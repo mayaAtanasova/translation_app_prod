@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Data files
+data/
+backup/
+*.wav
+*.mp3
+
+# Credentials
+*credentials*.json
+*.pem
+*.key
+config.json
+/credentials
+config.local.json
+config*
+video-cnference*
+
+# Logs
+*.log
+
+# OS
+Thumbs.db

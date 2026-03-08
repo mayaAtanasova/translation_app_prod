@@ -1,0 +1,12 @@
+# Raspberry Pi Client Requirements
+
+# Audio
+pyaudio==0.2.14
+
+# VAD
+torch>=2.2.0
+torchaudio>=2.2.0
+numpy
+
+# HTTP client
+requests==2.31.0

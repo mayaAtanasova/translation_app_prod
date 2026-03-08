@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Streamworks Live Translation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700;800&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #ECEDEB;
+    --surface: #E4E5E3;
+    --border:  #D4D5D3;
+    --green:   #1F3D2B;
+    --copper:  #C86A2A;
+    --text:    #111111;
+    --muted:   #888880;
+    --r:       3px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Screens ─────────────────────────────────────── */
+  .screen {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 24px;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+  .screen.hidden { opacity: 0; pointer-events: none; transform: translateY(10px); }
+
+  /* ── Login ───────────────────────────────────────── */
+  #login-screen { gap: 32px; }
+
+  .brand { text-align: center; }
+  .brand-name {
+    font-family: 'Barlow', sans-serif;
+    font-size: 24px; font-weight: 800;
+    color: var(--green); letter-spacing: -0.5px;
+  }
+  .brand-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: var(--muted);
+    letter-spacing: 3px; text-transform: uppercase;
+    margin-top: 6px;
+  }
+
+  .login-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 28px; width: 100%; max-width: 380px;
+    display: flex; flex-direction: column; gap: 24px;
+    box-shadow: 0 2px 16px rgba(31,61,43,0.08);
+  }
+
+  .field-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  .lang-grid { display: flex; flex-direction: column; gap: 7px; }
+
+  .lang-option {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 16px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--r);
+    cursor: pointer; transition: all 0.15s; user-select: none;
+  }
+  .lang-option:hover { border-color: rgba(31,61,43,0.4); }
+  .lang-option.selected { border-color: var(--green); background: rgba(31,61,43,0.04); }
+  .lang-option .flag { font-size: 26px; flex-shrink: 0; }
+  .lang-option .lang-info { flex: 1; }
+  .lang-option .lang-name {
+    font-family: 'Barlow', sans-serif;
+    font-size: 15px; font-weight: 600; color: var(--text);
+  }
+  .lang-option .lang-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: var(--muted);
+    letter-spacing: 1px; text-transform: uppercase; margin-top: 2px;
+  }
+  .lang-option .check {
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 1.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; flex-shrink: 0; transition: all 0.15s;
+  }
+  .lang-option.selected .check { background: var(--green); border-color: var(--green); color: #fff; }
+  .lang-option.selected .check::after { content: '✓'; }
+
+  .join-btn {
+    width: 100%; padding: 14px;
+    background: var(--green); color: #fff;
+    border: none; border-radius: var(--r);
+    font-family: 'Barlow', sans-serif;
+    font-size: 13px; font-weight: 700;
+    letter-spacing: 1.5px; text-transform: uppercase;
+    cursor: pointer; transition: opacity 0.15s, transform 0.1s;
+  }
+  .join-btn:hover { opacity: 0.88; }
+  .join-btn:active { transform: scale(0.98); }
+  .join-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+  /* ── Main screen ─────────────────────────────────── */
+  #main-screen { padding: 0; justify-content: flex-start; align-items: stretch; }
+
+  /* ── Topbar ──────────────────────────────────────── */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; height: 52px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0; background: var(--green);
+  }
+  .topbar-left { display: flex; align-items: center; gap: 12px; }
+  .topbar-brand {
+    font-family: 'Barlow', sans-serif;
+    font-size: 14px; font-weight: 800;
+    color: #fff; letter-spacing: -0.3px;
+  }
+  .topbar-divider { width: 1px; height: 18px; background: rgba(255,255,255,0.15); }
+  .live-badge {
+    display: flex; align-items: center; gap: 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: rgba(255,255,255,0.6);
+    letter-spacing: 2px; text-transform: uppercase;
+  }
+  .live-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--copper);
+    animation: pulse-dot 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .topbar-right { display: flex; align-items: center; gap: 8px; }
+
+  .lang-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 100px; padding: 5px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: rgba(255,255,255,0.9);
+    letter-spacing: 1px; cursor: pointer;
+    transition: background 0.15s; user-select: none;
+  }
+  .lang-pill:hover { background: rgba(255,255,255,0.18); }
+  .lang-pill-flag { font-size: 14px; }
+  .lang-pill-caret { font-size: 8px; opacity: 0.5; }
+
+  /* ── Text body ───────────────────────────────────── */
+  #text-body-wrap {
+    flex: 1; overflow-y: auto;
+    padding: 36px 28px 40px;
+    background: var(--bg);
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+    position: relative;
+  }
+  #text-body-wrap::-webkit-scrollbar { width: 4px; }
+  #text-body-wrap::-webkit-scrollbar-track { background: transparent; }
+  #text-body-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Top-shadow overlay — fades in once old chunks are being trimmed */
+  #top-shadow {
+    position: sticky;
+    top: 0;
+    height: 90px;
+    margin-bottom: -90px; /* overlap the text; doesn't push content down */
+    background: linear-gradient(to bottom, var(--bg) 20%, transparent 100%);
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+  #text-body-wrap.has-overflow #top-shadow { opacity: 1; }
+
+  #text-body {
+    font-family: 'Inter', sans-serif;
+    font-size: 22px;
+    line-height: 1.85;
+    font-weight: 400;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  /* Settled (past) chunks — grayed out */
+  .chunk.settled {
+    color: rgba(17,17,17,0.28);
+    transition: color 0.6s ease;
+  }
+
+  /* Active (currently typing + playing) chunk */
+  .chunk.active {
+    color: var(--text);
+  }
+  /* Blinking cursor after active text */
+  .chunk.active::after {
+    content: '\25AE'; /* ▮ */
+    color: var(--copper);
+    animation: blink-cursor 0.85s step-end infinite;
+    margin-left: 2px;
+  }
+  @keyframes blink-cursor { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+  /* Empty state hint inside text body */
+  .empty-hint {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px;
+    padding: 80px 24px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .empty-hint .hint-icon {
+    font-size: 32px; opacity: 0.3;
+  }
+  .empty-hint .hint-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .empty-hint .hint-desc {
+    font-size: 13px; color: var(--muted);
+    max-width: 200px; line-height: 1.7;
+  }
+
+  /* ── Status bar ──────────────────────────────────── */
+  .statusbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  .conn-pill {
+    display: flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 100px;
+    border: 1px solid var(--border);
+    color: var(--muted); transition: all 0.4s;
+  }
+  .conn-pill.connected { border-color: rgba(31,61,43,0.25); color: var(--green); }
+  .conn-pill.error     { border-color: rgba(200,106,42,0.3); color: var(--copper); }
+  .conn-orb {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor; flex-shrink: 0;
+  }
+  .conn-pill.connected .conn-orb { animation: orb-pulse 2s ease-in-out infinite; }
+  @keyframes orb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .queue-info {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: var(--muted); letter-spacing: 0.5px;
+  }
+
+  /* ── Language switch sheet ───────────────────────── */
+  .sheet-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.15);
+    z-index: 10; transition: opacity 0.25s ease;
+  }
+  .sheet-backdrop.hidden { opacity: 0; pointer-events: none; }
+  .lang-sheet {
+    position: fixed; top: 52px; left: 0; right: 0;
+    background: #fff;
+    border-top: 2px solid var(--green);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px 20px; z-index: 11;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+  .lang-sheet.hidden { opacity: 0; pointer-events: none; transform: translateY(-8px); }
+  .sheet-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 2px;
+    text-transform: uppercase; color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .sheet-lang-grid { display: flex; flex-direction: column; gap: 7px; }
+  .sheet-lang-btn {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--r);
+    cursor: pointer; transition: all 0.15s; user-select: none;
+  }
+  .sheet-lang-btn:hover { border-color: var(--green); }
+  .sheet-lang-btn.current { opacity: 0.4; cursor: default; }
+  .sheet-lang-btn .flag { font-size: 22px; }
+  .sheet-lang-btn .name {
+    font-family: 'Barlow', sans-serif;
+    font-size: 14px; font-weight: 600; color: var(--text);
+  }
+  .sheet-lang-btn .code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; color: var(--muted);
+    letter-spacing: 1px; text-transform: uppercase; margin-left: auto;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Login Screen ──────────────────────────────────── -->
+<div id="login-screen" class="screen">
+  <div class="brand">
+    <div class="brand-name">Streamworks</div>
+    <div class="brand-sub">Live Translation</div>
+  </div>
+  <div class="login-card">
+    <div>
+      <div class="field-label">Select your language</div>
+      <div class="lang-grid" id="lang-grid"></div>
+    </div>
+    <button class="join-btn" id="join-btn" disabled>Join Session</button>
+  </div>
+</div>
+
+<!-- ── Main Screen ───────────────────────────────────── -->
+<div id="main-screen" class="screen hidden">
+
+  <div class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-brand">Streamworks</span>
+      <div class="topbar-divider"></div>
+      <div class="live-badge">
+        <div class="live-dot"></div>
+        Live
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="lang-pill" id="lang-pill-btn">
+        <span class="lang-pill-flag" id="lang-pill-flag"></span>
+        <span id="lang-pill-label"></span>
+        <span class="lang-pill-caret">&#9660;</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="text-body-wrap">
+    <div id="top-shadow"></div>
+    <div id="text-body">
+      <div class="empty-hint" id="empty-hint">
+        <div class="hint-icon">&#127908;</div>
+        <div class="hint-label">Waiting for audio</div>
+        <div class="hint-desc">Translations will appear here as the conference is transcribed.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="conn-pill" id="conn-pill">
+      <div class="conn-orb"></div>
+      <span id="conn-text">Connecting</span>
+    </div>
+    <div class="queue-info" id="queue-info"></div>
+  </div>
+
+</div>
+
+<!-- ── Language switch sheet ─────────────────────────── -->
+<div class="sheet-backdrop hidden" id="sheet-backdrop"></div>
+<div class="lang-sheet hidden" id="lang-sheet">
+  <div class="sheet-title">Switch Language</div>
+  <div class="sheet-lang-grid" id="sheet-lang-grid"></div>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────
+   Config — edit BACKEND_URL to match your deployment
+   ───────────────────────────────────────────────────── */
+const BACKEND_URL = 'wss://sw-translation.ngrok.app';
+const HTTP_BASE   = BACKEND_URL.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+
+const LANGUAGES = {
+  'sv-SE': { label: 'SV', name: 'Swedish',   flag: '\uD83C\uDDF8\uD83C\uDDEA' },
+  'nb-NO': { label: 'NO', name: 'Norwegian',  flag: '\uD83C\uDDF3\uD83C\uDDF4' },
+  'de-DE': { label: 'DE', name: 'German',     flag: '\uD83C\uDDE9\uD83C\uDDEA' },
+};
+
+/* ─────────────────────────────────────────────────────
+   State
+   ───────────────────────────────────────────────────── */
+let ws              = null;
+let selectedLang    = null;
+let sessionId       = null;
+let intentionalClose = false;
+let pingInterval    = null;
+
+const queue         = [];
+let isProcessing    = false;
+let currentAudio    = null;
+let totalWords      = 0;
+const WORD_LIMIT    = 300;
+
+/* ─────────────────────────────────────────────────────
+   Elements
+   ───────────────────────────────────────────────────── */
+const loginScreen  = document.getElementById('login-screen');
+const mainScreen   = document.getElementById('main-screen');
+const langGrid     = document.getElementById('lang-grid');
+const joinBtn      = document.getElementById('join-btn');
+const textBody     = document.getElementById('text-body');
+const emptyHint    = document.getElementById('empty-hint');
+const wrap         = document.getElementById('text-body-wrap');
+const connPill     = document.getElementById('conn-pill');
+const connText     = document.getElementById('conn-text');
+const queueInfo    = document.getElementById('queue-info');
+const langPillBtn  = document.getElementById('lang-pill-btn');
+const langPillFlag = document.getElementById('lang-pill-flag');
+const langPillLabel= document.getElementById('lang-pill-label');
+const sheetBackdrop= document.getElementById('sheet-backdrop');
+const langSheet    = document.getElementById('lang-sheet');
+const sheetLangGrid= document.getElementById('sheet-lang-grid');
+
+/* ─────────────────────────────────────────────────────
+   Login — build language grid
+   ───────────────────────────────────────────────────── */
+Object.entries(LANGUAGES).forEach(([code, info]) => {
+  const el = document.createElement('div');
+  el.className = 'lang-option';
+  el.innerHTML = `
+    <span class="flag">${info.flag}</span>
+    <div class="lang-info">
+      <div class="lang-name">${info.name}</div>
+      <div class="lang-code">${code}</div>
+    </div>
+    <div class="check"></div>
+  `;
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.lang-option').forEach(b => b.classList.remove('selected'));
+    el.classList.add('selected');
+    selectedLang = code;
+    joinBtn.disabled = false;
+  });
+  langGrid.appendChild(el);
+});
+
+joinBtn.addEventListener('click', () => {
+  if (!selectedLang) return;
+  const info = LANGUAGES[selectedLang];
+  langPillFlag.textContent  = info.flag;
+  langPillLabel.textContent = info.label;
+  loginScreen.classList.add('hidden');
+  mainScreen.classList.remove('hidden');
+  connectWS(selectedLang);
+});
+
+/* ─────────────────────────────────────────────────────
+   WebSocket
+   ───────────────────────────────────────────────────── */
+function connectWS(lang) {
+  setConnStatus('connecting');
+  if (ws) { intentionalClose = true; ws.close(); }
+  if (pingInterval) clearInterval(pingInterval);
+
+  const doConnect = () => {
+    intentionalClose = false;
+    ws = new WebSocket(`${BACKEND_URL}/ws/${lang}`);
+
+    ws.onopen = () => {
+      setConnStatus('connected');
+      pingInterval = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+      }, 20000);
+    };
+
+    ws.onmessage = e => {
+      if (e.data === 'pong') return;
+      try { handleMessage(JSON.parse(e.data)); }
+      catch (err) { console.warn('Unreadable message:', e.data); }
+    };
+
+    ws.onclose = () => {
+      if (intentionalClose) return;
+      clearInterval(pingInterval);
+      setConnStatus('error');
+      setTimeout(() => connectWS(lang), 3000);
+    };
+  };
+
+  intentionalClose ? setTimeout(doConnect, 220) : doConnect();
+}
+
+/* ─────────────────────────────────────────────────────
+   Message handler
+   ───────────────────────────────────────────────────── */
+function handleMessage(msg) {
+  if (msg.type === 'connected') {
+    sessionId = msg.session;
+    loadManifest(sessionId);
+  } else if (msg.type === 'translation') {
+    if (!msg.translation || !msg.translation.trim()) return;
+    enqueue(msg);
+  }
+}
+
+/* ─────────────────────────────────────────────────────
+   Load history from manifest (shown immediately, settled)
+   ───────────────────────────────────────────────────── */
+async function loadManifest(sid) {
+  if (!sid) return;
+  try {
+    const res = await fetch(`${HTTP_BASE}/sessions/${sid}/manifest`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.chunks || data.chunks.length === 0) return;
+
+    data.chunks.forEach(chunk => {
+      const t = chunk.translations && chunk.translations[selectedLang];
+      if (!t || !t.text || !t.text.trim()) return;
+      if (!chunk.transcript || !chunk.transcript.trim()) return;
+      appendSettled(t.text.trim());
+    });
+    scrollToBottom();
+  } catch (e) {
+    console.warn('Could not load manifest:', e);
+  }
+}
+
+/* ─────────────────────────────────────────────────────
+   Append a chunk as already-settled text (no animation)
+   ───────────────────────────────────────────────────── */
+function appendSettled(text) {
+  hideEmptyHint();
+  const span = document.createElement('span');
+  span.className = 'chunk settled';
+  span.textContent = text;
+  textBody.appendChild(span);
+  textBody.appendChild(document.createTextNode(' '));
+  totalWords += countWords(text);
+  trimToWordLimit();
+}
+
+/* ─────────────────────────────────────────────────────
+   Queue — holds incoming chunks waiting to be typed
+   ───────────────────────────────────────────────────── */
+function enqueue(item) {
+  queue.push(item);
+  updateQueueInfo();
+  if (!isProcessing) processNext();
+}
+
+function processNext() {
+  updateQueueInfo();
+  if (queue.length === 0) { isProcessing = false; return; }
+  isProcessing = true;
+
+  const item  = queue.shift();
+  const text  = item.translation.trim();
+  if (!text) { processNext(); return; }
+
+  hideEmptyHint();
+
+  /* Create the active span that will receive typed characters */
+  const span = document.createElement('span');
+  span.className = 'chunk active';
+  textBody.appendChild(span);
+  scrollToBottom();
+
+  let audioDone = false;
+  let typeDone  = false;
+
+  const trySettle = () => {
+    if (!audioDone || !typeDone) return;
+    span.className = 'chunk settled';
+    textBody.appendChild(document.createTextNode(' '));
+    totalWords += countWords(text);
+    trimToWordLimit();
+    setTimeout(processNext, 300); /* brief pause between chunks */
+  };
+
+  /* ── Start typewriter at a given ms-per-char rate ── */
+  const startTyping = msPerChar => {
+    let i = 0;
+    const tick = () => {
+      if (i >= text.length) { typeDone = true; trySettle(); return; }
+      span.textContent = text.slice(0, ++i);
+      scrollToBottom();
+      setTimeout(tick, msPerChar);
+    };
+    tick();
+  };
+
+  /* ── Audio ── */
+  if (item.audio_url) {
+    const fullUrl = item.audio_url.startsWith('http')
+      ? item.audio_url
+      : HTTP_BASE + item.audio_url;
+
+    const audio = new Audio(fullUrl);
+    currentAudio = audio;
+
+    audio.onended  = () => { audioDone = true; trySettle(); };
+    audio.onerror  = () => { audioDone = true; trySettle(); };
+
+    /* Wait for metadata so we can sync typing speed to audio duration.
+       Fall back to ~70 ms/char if metadata takes too long.            */
+    let started = false;
+    const go = msPerChar => {
+      if (started) return;
+      started = true;
+      audio.play().catch(() => { audioDone = true; trySettle(); });
+      startTyping(msPerChar);
+    };
+
+    const fallback = setTimeout(() => go(70), 400);
+
+    audio.addEventListener('loadedmetadata', () => {
+      clearTimeout(fallback);
+      const ms = audio.duration > 0
+        ? Math.max(25, Math.min(160, (audio.duration * 1000) / text.length))
+        : 70;
+      go(ms);
+    }, { once: true });
+
+    audio.load();
+  } else {
+    /* No audio — just type at default rate */
+    audioDone = true;
+    startTyping(70);
+  }
+}
+
+/* ─────────────────────────────────────────────────────
+   Helpers
+   ───────────────────────────────────────────────────── */
+function hideEmptyHint() {
+  if (emptyHint.parentNode) emptyHint.remove();
+}
+
+function countWords(text) {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function trimToWordLimit() {
+  while (totalWords > WORD_LIMIT) {
+    const oldest = textBody.querySelector('.chunk.settled');
+    if (!oldest) break;
+    const w = countWords(oldest.textContent);
+    /* Remove the trailing space text node too */
+    const next = oldest.nextSibling;
+    if (next && next.nodeType === Node.TEXT_NODE) next.remove();
+    oldest.remove();
+    totalWords -= w;
+    wrap.classList.add('has-overflow');
+  }
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => { wrap.scrollTop = wrap.scrollHeight; });
+}
+
+function setConnStatus(state) {
+  connPill.className = 'conn-pill'
+    + (state === 'connected' ? ' connected' : state === 'error' ? ' error' : '');
+  connText.textContent =
+    { connected: 'Connected', error: 'Reconnecting', connecting: 'Connecting' }[state] || state;
+}
+
+function updateQueueInfo() {
+  queueInfo.textContent = queue.length > 0 ? `${queue.length} queued` : '';
+}
+
+/* ─────────────────────────────────────────────────────
+   Language switch
+   ───────────────────────────────────────────────────── */
+langPillBtn.addEventListener('click', openSheet);
+sheetBackdrop.addEventListener('click', closeSheet);
+
+function openSheet() {
+  sheetLangGrid.innerHTML = '';
+  Object.entries(LANGUAGES).forEach(([code, info]) => {
+    const btn = document.createElement('div');
+    btn.className = 'sheet-lang-btn' + (code === selectedLang ? ' current' : '');
+    btn.innerHTML = `
+      <span class="flag">${info.flag}</span>
+      <span class="name">${info.name}</span>
+      <span class="code">${code}</span>
+    `;
+    if (code !== selectedLang) btn.addEventListener('click', () => switchLang(code));
+    sheetLangGrid.appendChild(btn);
+  });
+  langSheet.classList.remove('hidden');
+  sheetBackdrop.classList.remove('hidden');
+}
+
+function closeSheet() {
+  langSheet.classList.add('hidden');
+  sheetBackdrop.classList.add('hidden');
+}
+
+function switchLang(newLang) {
+  closeSheet();
+  if (newLang === selectedLang) return;
+  selectedLang = newLang;
+  const info = LANGUAGES[newLang];
+  langPillFlag.textContent  = info.flag;
+  langPillLabel.textContent = info.label;
+
+  /* Stop audio, clear queue and text body */
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  queue.length = 0;
+  isProcessing = false;
+  totalWords = 0;
+  updateQueueInfo();
+  textBody.innerHTML = '';
+  textBody.appendChild(emptyHint);
+  wrap.classList.remove('has-overflow');
+
+  intentionalClose = true;
+  connectWS(newLang);
+}
+</script>
+</body>
+</html>

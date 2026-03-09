@@ -10,6 +10,7 @@ websockets==12.0
 google-cloud-speech==2.21.0
 google-cloud-translate==3.12.1
 google-cloud-texttospeech==2.14.2
+google-genai
 
 # Utilities
 python-dotenv==1.0.0

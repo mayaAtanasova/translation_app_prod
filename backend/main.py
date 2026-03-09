@@ -23,7 +23,11 @@ from google.cloud import translate_v2 as translate
 from google.cloud import texttospeech
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -368,6 +372,13 @@ async def create_new_session():
     """Create a new session (useful for starting fresh)"""
     session_id = create_session()
     return {"session_id": session_id}
+
+# Serve frontend
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/app")
+async def serve_frontend():
+    return FileResponse("static/index.html")
 
 
 if __name__ == "__main__":

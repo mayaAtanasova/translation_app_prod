@@ -226,7 +226,7 @@ async def receive_audio_chunk(
             f.write(f"Confidence: {confidence:.2%}\n")
             f.write(f"Transcript: {transcript}\n")
         
-        # Step 2 & 3: Translate and synthesize for each target language
+        # Step 2 & 3: Translate and synthesize for all languages in parallel
         chunk_data = {
             "chunk_id": chunk_id,
             "timestamp": datetime.now().isoformat(),
@@ -234,21 +234,20 @@ async def receive_audio_chunk(
             "confidence": confidence,
             "translations": {}
         }
-        
-        for lang_code, lang_info in TARGET_LANGUAGES.items():
+
+        async def process_language(lang_code, lang_info):
+            """Translate + TTS + save + broadcast for one language."""
             logger.info(f"Processing {lang_info['name']}...")
-            
-            # Translate
-            translation_result = translate_client.translate(
+
+            translation_result = await asyncio.to_thread(
+                translate_client.translate,
                 transcript,
                 target_language=lang_info['translate_code'],
                 source_language='en'
             )
             translated_text = translation_result['translatedText']
-            
             logger.info(f"{lang_info['name']}: {translated_text}")
-            
-            # Text-to-Speech
+
             synthesis_input = texttospeech.SynthesisInput(text=translated_text)
             voice = texttospeech.VoiceSelectionParams(
                 language_code=lang_info['tts_code'],
@@ -257,34 +256,41 @@ async def receive_audio_chunk(
             audio_config = texttospeech.AudioConfig(
                 audio_encoding=texttospeech.AudioEncoding.MP3
             )
-            
-            tts_response = tts_client.synthesize_speech(
+            tts_response = await asyncio.to_thread(
+                tts_client.synthesize_speech,
                 input=synthesis_input,
                 voice=voice,
                 audio_config=audio_config
             )
-            
-            # Save translated audio
+
             audio_path = chunks_dir / f"{chunk_id}_{lang_code}.mp3"
             with open(audio_path, 'wb') as f:
                 f.write(tts_response.audio_content)
-            
-            # Store translation data
-            chunk_data['translations'][lang_code] = {
-                "text": translated_text,
-                "audio_url": f"/audio/{session_id}/{chunk_id}_{lang_code}.mp3"
-            }
-            
-            # Broadcast to connected clients
+
+            audio_url = f"/audio/{session_id}/{chunk_id}_{lang_code}.mp3"
+
             await broadcast_translation(lang_code, {
                 "type": "translation",
                 "chunk_id": chunk_id,
                 "timestamp": chunk_data['timestamp'],
                 "original": transcript,
                 "translation": translated_text,
-                "audio_url": chunk_data['translations'][lang_code]['audio_url'],
+                "audio_url": audio_url,
                 "language": lang_code
             })
+
+            return lang_code, translated_text, audio_url
+
+        results = await asyncio.gather(*[
+            process_language(lang_code, lang_info)
+            for lang_code, lang_info in TARGET_LANGUAGES.items()
+        ])
+
+        for lang_code, translated_text, audio_url in results:
+            chunk_data['translations'][lang_code] = {
+                "text": translated_text,
+                "audio_url": audio_url
+            }
         
         # Update manifest
         update_manifest(chunk_data)

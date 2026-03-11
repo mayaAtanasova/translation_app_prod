@@ -14,6 +14,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import asyncio
+import queue as thread_queue
 from typing import Dict, Set
 import logging
 
@@ -307,6 +308,211 @@ async def receive_audio_chunk(
     except Exception as e:
         logger.error(f"Error processing chunk: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def broadcast_interim_translation(lang_code: str, lang_info: dict, transcript: str):
+    """Translate and broadcast an interim result — no TTS, no file I/O."""
+    try:
+        result = await asyncio.to_thread(
+            translate_client.translate,
+            transcript,
+            target_language=lang_info['translate_code'],
+            source_language='en',
+        )
+        await broadcast_translation(lang_code, {
+            "type": "interim",
+            "translation": result['translatedText'],
+            "original": transcript,
+            "language": lang_code,
+        })
+    except Exception as e:
+        logger.error(f"Interim translation error ({lang_code}): {e}")
+
+
+async def process_language_streaming(
+    lang_code: str, lang_info: dict, transcript: str, chunk_id: str, session_id: str
+):
+    """Full translate + TTS pipeline for a streaming final result."""
+    try:
+        translation_result = await asyncio.to_thread(
+            translate_client.translate,
+            transcript,
+            target_language=lang_info['translate_code'],
+            source_language='en',
+        )
+        translated_text = translation_result['translatedText']
+
+        synthesis_input = texttospeech.SynthesisInput(text=translated_text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=lang_info['tts_code'],
+            ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL,
+        )
+        audio_cfg = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+        tts_response = await asyncio.to_thread(
+            tts_client.synthesize_speech,
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_cfg,
+        )
+
+        chunks_dir = SESSIONS_DIR / session_id / "chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = chunks_dir / f"{chunk_id}_{lang_code}.mp3"
+        with open(audio_path, 'wb') as f:
+            f.write(tts_response.audio_content)
+
+        audio_url = f"/audio/{session_id}/{chunk_id}_{lang_code}.mp3"
+        await broadcast_translation(lang_code, {
+            "type": "translation",
+            "chunk_id": chunk_id,
+            "timestamp": datetime.now().isoformat(),
+            "original": transcript,
+            "translation": translated_text,
+            "audio_url": audio_url,
+            "language": lang_code,
+        })
+    except Exception as e:
+        logger.error(f"Streaming language processing error ({lang_code}): {e}")
+
+
+@app.websocket("/ws/audio/{device_id}")
+async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
+    """
+    WebSocket endpoint for Raspberry Pi streaming audio.
+    Pi sends raw 16kHz/16-bit/mono PCM frames while VAD is triggered.
+    Backend pipes them to Google STT Streaming API for real-time results.
+    """
+    await websocket.accept()
+    logger.info(f"Streaming audio connection from device: {device_id}")
+
+    session_id = get_current_session()
+    loop = asyncio.get_running_loop()
+
+    # threading.Queue bridges the async WebSocket receiver and the sync STT thread
+    audio_q: thread_queue.Queue = thread_queue.Queue()
+    # asyncio.Queue carries STT results back to the async result processor
+    result_q: asyncio.Queue = asyncio.Queue()
+
+    streaming_config = speech_v1.StreamingRecognitionConfig(
+        config=speech_v1.RecognitionConfig(
+            encoding=speech_v1.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code="en-US",
+            enable_automatic_punctuation=True,
+        ),
+        interim_results=True,
+        single_utterance=True,  # return a final result at each natural pause, then restart
+    )
+
+    def stt_worker():
+        """
+        Runs in thread pool. Manages STT stream sessions across speech bursts.
+        Blocks until audio arrives before opening a stream (avoids idle-timeout),
+        then closes the stream after STREAM_SILENCE_TIMEOUT seconds of no audio
+        and restarts automatically for the next burst.
+        """
+        STREAM_SILENCE_TIMEOUT = 5  # seconds of queue silence before closing stream
+
+        while True:
+            # Block until audio arrives — don't open a stream while the room is quiet
+            first_chunk = audio_q.get()
+            if first_chunk is None:
+                break   # permanent stop from receive_audio()
+
+            def request_gen():
+                yield speech_v1.StreamingRecognizeRequest(audio_content=first_chunk)
+                while True:
+                    try:
+                        chunk = audio_q.get(timeout=STREAM_SILENCE_TIMEOUT)
+                    except thread_queue.Empty:
+                        logger.debug("STT stream closing after silence, will restart on next speech")
+                        return
+                    if chunk is None:
+                        audio_q.put(None)   # re-queue so outer loop sees the stop
+                        return
+                    yield speech_v1.StreamingRecognizeRequest(audio_content=chunk)
+
+            try:
+                for response in stt_client.streaming_recognize(streaming_config, request_gen()):
+                    for result in response.results:
+                        if not result.alternatives:
+                            continue
+                        asyncio.run_coroutine_threadsafe(
+                            result_q.put({
+                                "transcript": result.alternatives[0].transcript,
+                                "is_final": result.is_final,
+                                "confidence": result.alternatives[0].confidence if result.is_final else None,
+                            }),
+                            loop,
+                        )
+            except Exception as e:
+                logger.error(f"STT streaming error: {e}")
+                # Loop back and wait for next audio regardless of error type
+
+        asyncio.run_coroutine_threadsafe(result_q.put(None), loop)
+
+    async def receive_audio():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if "bytes" in msg and msg["bytes"]:
+                    audio_q.put(msg["bytes"])
+                elif "text" in msg:
+                    try:
+                        data = json.loads(msg["text"])
+                        if data.get("type") == "ping":
+                            await websocket.send_text("pong")
+                    except Exception:
+                        pass
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.error(f"Audio receive error: {e}")
+        finally:
+            audio_q.put(None)   # signal STT thread to stop
+
+    async def process_results():
+        chunk_counter = 0
+        last_interim_words = 0
+
+        while True:
+            result = await result_q.get()
+            if result is None:
+                break
+
+            transcript = result["transcript"].strip()
+            if not transcript:
+                continue
+
+            if result["is_final"]:
+                chunk_counter += 1
+                chunk_id = f"s{chunk_counter:03d}"
+                last_interim_words = 0
+                logger.info(f"Final transcript [{device_id}]: {transcript}")
+
+                await asyncio.gather(*[
+                    process_language_streaming(lang_code, lang_info, transcript, chunk_id, session_id)
+                    for lang_code, lang_info in TARGET_LANGUAGES.items()
+                ])
+            else:
+                # Throttle interim translations: only re-translate every 3 new words
+                word_count = len(transcript.split())
+                if word_count >= last_interim_words + 3:
+                    last_interim_words = word_count
+                    logger.debug(f"Interim [{device_id}]: {transcript}")
+                    await asyncio.gather(*[
+                        broadcast_interim_translation(lang_code, lang_info, transcript)
+                        for lang_code, lang_info in TARGET_LANGUAGES.items()
+                    ])
+
+    stt_future = loop.run_in_executor(None, stt_worker)
+    await asyncio.gather(receive_audio(), process_results())
+    await stt_future
+    logger.info(f"Streaming connection from {device_id} closed")
 
 
 @app.websocket("/ws/{language_code}")

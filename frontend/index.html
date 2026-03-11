@@ -203,6 +203,12 @@
     transition: color 0.6s ease;
   }
 
+  /* Interim (streaming STT in progress) chunk — dimmed, italic */
+  .chunk.interim {
+    color: rgba(17,17,17,0.45);
+    font-style: italic;
+  }
+
   /* Active (currently typing + playing) chunk */
   .chunk.active {
     color: var(--text);
@@ -403,6 +409,7 @@ const queue         = [];
 let isProcessing    = false;
 let currentAudio    = null;
 let totalWords      = 0;
+let interimSpan     = null;   /* live interim translation span */
 const WORD_LIMIT    = 300;
 const MAX_QUEUE_DEPTH = 4; /* flush stale items as text-only beyond this depth */
 
@@ -511,7 +518,33 @@ function handleMessage(msg) {
     loadManifest(sessionId);
   } else if (msg.type === 'translation') {
     if (!msg.translation || !msg.translation.trim()) return;
+    clearInterim();
     enqueue(msg);
+  } else if (msg.type === 'interim') {
+    if (!msg.translation || !msg.translation.trim()) return;
+    showInterim(msg.translation.trim());
+  }
+}
+
+/* ─────────────────────────────────────────────────────
+   Interim display — shows streaming STT translation
+   before the final result + audio arrive
+   ───────────────────────────────────────────────────── */
+function showInterim(text) {
+  hideEmptyHint();
+  if (!interimSpan) {
+    interimSpan = document.createElement('span');
+    interimSpan.className = 'chunk interim';
+    textBody.appendChild(interimSpan);
+  }
+  interimSpan.textContent = text;
+  scrollToBottom();
+}
+
+function clearInterim() {
+  if (interimSpan) {
+    interimSpan.remove();
+    interimSpan = null;
   }
 }
 

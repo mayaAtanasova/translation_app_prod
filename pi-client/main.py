@@ -14,6 +14,12 @@ from datetime import datetime
 from pathlib import Path
 import threading
 
+try:
+    import websocket as ws_client   # websocket-client package
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+
 # Add path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -48,6 +54,63 @@ class Config:
     LOCAL_BACKUP_DIR = Path("./backup")
 
 
+class StreamingTranslationClient:
+    """
+    WebSocket client that streams raw PCM audio frames to the backend
+    in real-time as VAD detects speech. The backend pipes these directly
+    into Google STT Streaming API for low-latency transcription.
+    """
+
+    def __init__(self, backend_url: str, device_id: str):
+        self.ws_url = (
+            backend_url
+            .replace('https://', 'wss://')
+            .replace('http://', 'ws://')
+        )
+        self.device_id = device_id
+        self.ws = None
+        self.connected = False
+        self._connect()
+
+    def _connect(self):
+        url = f"{self.ws_url}/ws/audio/{self.device_id}"
+        self.ws = ws_client.WebSocketApp(
+            url,
+            on_open=self._on_open,
+            on_close=self._on_close,
+            on_error=self._on_error,
+        )
+        t = threading.Thread(
+            target=self.ws.run_forever,
+            kwargs={"reconnect": 5},
+            daemon=True,
+        )
+        t.start()
+
+    def _on_open(self, ws):
+        self.connected = True
+        print("✓ Streaming WebSocket connected to backend")
+
+    def _on_close(self, ws, code, msg):
+        self.connected = False
+        print(f"WebSocket closed (code={code}), reconnecting in 5s...")
+
+    def _on_error(self, ws, error):
+        print(f"WebSocket error: {error}")
+
+    def send_audio(self, audio_bytes: bytes):
+        if self.ws and self.connected:
+            try:
+                self.ws.send(audio_bytes, ws_client.ABNF.OPCODE_BINARY)
+            except Exception as e:
+                print(f"Error sending audio frame: {e}")
+                self.connected = False
+
+    def close(self):
+        if self.ws:
+            self.ws.close()
+
+
 class AudioCapture:
     """Handle audio input from microphone"""
     
@@ -55,6 +118,8 @@ class AudioCapture:
         self.device_index = device_index
         self.audio = pyaudio.PyAudio()
         self.stream = None
+        self.actual_sample_rate = Config.SAMPLE_RATE
+        self.capture_chunk_size = Config.CHUNK_SIZE
         
     def list_devices(self):
         """List available audio devices"""
@@ -94,32 +159,63 @@ class AudioCapture:
                 print("Invalid selection")
     
     def start_stream(self):
-        """Start audio stream"""
-        try:
-            self.stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=Config.CHANNELS,
-                rate=Config.SAMPLE_RATE,
-                input=True,
-                input_device_index=self.device_index,
-                frames_per_buffer=Config.CHUNK_SIZE
-            )
-            print(f"✓ Audio stream started (device: {self.device_index or 'default'})")
-            return True
-        except Exception as e:
-            print(f"✗ Failed to start audio stream: {e}")
-            return False
-    
+        """Start audio stream, falling back to device native rate if 16kHz is unsupported."""
+        # Determine capture rate: prefer 16kHz, fall back to device default
+        device_info = (
+            self.audio.get_device_info_by_index(self.device_index)
+            if self.device_index is not None
+            else self.audio.get_default_input_device_info()
+        )
+        native_rate = int(device_info['defaultSampleRate'])
+        candidate_rates = [Config.SAMPLE_RATE, native_rate]
+
+        for rate in candidate_rates:
+            try:
+                chunk_size = int(rate * Config.CHUNK_DURATION_MS / 1000)
+                self.stream = self.audio.open(
+                    format=pyaudio.paInt16,
+                    channels=Config.CHANNELS,
+                    rate=rate,
+                    input=True,
+                    input_device_index=self.device_index,
+                    frames_per_buffer=chunk_size,
+                )
+                self.actual_sample_rate = rate
+                self.capture_chunk_size = chunk_size
+                if rate != Config.SAMPLE_RATE:
+                    print(f"✓ Audio stream started at {rate} Hz (will resample to {Config.SAMPLE_RATE} Hz)")
+                else:
+                    print(f"✓ Audio stream started at {rate} Hz")
+                return True
+            except Exception as e:
+                if rate == candidate_rates[-1]:
+                    print(f"✗ Failed to start audio stream: {e}")
+                    return False
+
     def read_chunk(self):
-        """Read one chunk of audio"""
+        """Read one chunk of audio, resampling to 16kHz if the device runs at a different rate."""
         if not self.stream:
             return None
-        
+
         try:
-            return self.stream.read(Config.CHUNK_SIZE, exception_on_overflow=False)
+            raw = self.stream.read(self.capture_chunk_size, exception_on_overflow=False)
         except Exception as e:
             print(f"Error reading audio: {e}")
             return None
+
+        if self.actual_sample_rate == Config.SAMPLE_RATE:
+            return raw
+
+        # Resample from device rate → 16kHz using numpy linear interpolation
+        import numpy as np
+        pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+        target_len = int(len(pcm) * Config.SAMPLE_RATE / self.actual_sample_rate)
+        resampled = np.interp(
+            np.linspace(0, len(pcm) - 1, target_len),
+            np.arange(len(pcm)),
+            pcm,
+        ).astype(np.int16)
+        return resampled.tobytes()
     
     def cleanup(self):
         """Stop and close stream"""
@@ -141,16 +237,21 @@ class TranslationClient:
         )
         self.chunk_counter = 0
         self.running = False
-        
+        self.streaming_client = None
+
         # Create backup directory if enabled
         if Config.ENABLE_LOCAL_BACKUP:
             Config.LOCAL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        
+
         print("\n" + "🎤" * 30)
         print("TRANSLATION CLIENT - RASPBERRY PI")
         print("🎤" * 30)
         print(f"Backend: {self.backend_url}")
         print(f"Device ID: {Config.DEVICE_ID}")
+        if WEBSOCKET_AVAILABLE:
+            print("Mode:    streaming WebSocket")
+        else:
+            print("Mode:    HTTP POST (install websocket-client for streaming)")
         print("=" * 60 + "\n")
     
     def test_backend_connection(self):
@@ -263,36 +364,59 @@ class TranslationClient:
         
         print("\n✓ Ready to capture audio")
         print("Speak into the microphone. Press Ctrl+C to stop.\n")
-        
+
+        # Start streaming WebSocket connection if available
+        if WEBSOCKET_AVAILABLE:
+            self.streaming_client = StreamingTranslationClient(
+                backend_url=self.backend_url,
+                device_id=Config.DEVICE_ID,
+            )
+            # Give the WebSocket a moment to connect before audio starts
+            time.sleep(1.5)
+
         self.running = True
-        chunk_count = 0
-        
+        silence_count = 0
+
         try:
             while self.running:
-                # Read audio chunk
                 chunk = self.audio_capture.read_chunk()
                 if not chunk:
                     break
-                
-                # Process with VAD
+
                 speech_data, is_complete = self.vad.process_chunk(chunk)
-                
-                if is_complete and speech_data:
-                    print()
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending chunk...")
-                    # Send in background thread to not block audio capture
-                    threading.Thread(target=self.send_audio_chunk, args=(speech_data,), daemon=True).start()
-                    
-                elif self.vad.triggered:
-                    # Currently speaking
-                    print("🎤", end="", flush=True)
-                    chunk_count = 0
-                    
+
+                if self.streaming_client and self.streaming_client.connected:
+                    # ── Streaming mode ──────────────────────────────────
+                    # Send each raw chunk immediately while VAD is triggered.
+                    # is_complete catches the final chunk where triggered just
+                    # turned False (trailing silence that ends the segment).
+                    if self.vad.triggered or is_complete:
+                        self.streaming_client.send_audio(chunk)
+
+                    if self.vad.triggered:
+                        print("🎤", end="", flush=True)
+                        silence_count = 0
+                    else:
+                        silence_count += 1
+                        if silence_count % 10 == 0:
+                            print(".", end="", flush=True)
                 else:
-                    # Silence
-                    chunk_count += 1
-                    if chunk_count % 10 == 0:
-                        print(".", end="", flush=True)
+                    # ── HTTP POST fallback (original behaviour) ──────────
+                    if is_complete and speech_data:
+                        print()
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending chunk (HTTP)...")
+                        threading.Thread(
+                            target=self.send_audio_chunk,
+                            args=(speech_data,),
+                            daemon=True,
+                        ).start()
+                    elif self.vad.triggered:
+                        print("🎤", end="", flush=True)
+                        silence_count = 0
+                    else:
+                        silence_count += 1
+                        if silence_count % 10 == 0:
+                            print(".", end="", flush=True)
         
         except KeyboardInterrupt:
             print("\n\nStopping...")
@@ -303,13 +427,19 @@ class TranslationClient:
     def stop(self):
         """Cleanup and stop"""
         self.running = False
-        
+
+        if self.streaming_client:
+            self.streaming_client.close()
+
         if self.audio_capture:
             self.audio_capture.cleanup()
         
         print("\n" + "="*60)
         print(f"Session complete!")
-        print(f"Chunks sent: {self.chunk_counter}")
+        if self.streaming_client:
+            print("Mode: streaming WebSocket (see backend logs for chunk count)")
+        else:
+            print(f"Chunks sent: {self.chunk_counter}")
         if Config.ENABLE_LOCAL_BACKUP:
             print(f"Local backup: {Config.LOCAL_BACKUP_DIR}")
         print("="*60 + "\n")

@@ -375,6 +375,14 @@ class TranslationClient:
             time.sleep(1.5)
 
         self.running = True
+
+        # Streaming state: VAD triggers the start of streaming; a long silence
+        # ends it. While streaming, ALL audio (speech + silence) is forwarded
+        # so Google STT gets a continuous signal and can detect sentence
+        # boundaries itself via natural pauses in the audio.
+        STREAM_END_SILENCE_MS = 5000   # ms of silence before pausing the stream
+        streaming_active = False
+        stream_silence_ms = 0.0
         silence_count = 0
 
         try:
@@ -384,22 +392,40 @@ class TranslationClient:
                     break
 
                 speech_data, is_complete = self.vad.process_chunk(chunk)
+                chunk_ms = len(chunk) / 2 / Config.SAMPLE_RATE * 1000
 
                 if self.streaming_client and self.streaming_client.connected:
                     # ── Streaming mode ──────────────────────────────────
-                    # Send each raw chunk immediately while VAD is triggered.
-                    # is_complete catches the final chunk where triggered just
-                    # turned False (trailing silence that ends the segment).
-                    if self.vad.triggered or is_complete:
-                        self.streaming_client.send_audio(chunk)
-
                     if self.vad.triggered:
-                        print("🎤", end="", flush=True)
+                        # Speech detected — start streaming if not already active
+                        if not streaming_active:
+                            print("\n▶ streaming", flush=True)
+                            streaming_active = True
+                        stream_silence_ms = 0.0
                         silence_count = 0
-                    else:
+                        self.streaming_client.send_audio(chunk)
+                        print("🎤", end="", flush=True)
+
+                    elif streaming_active:
+                        # Silence while stream is active — keep sending so
+                        # Google sees the pause and can finalize sentences
+                        stream_silence_ms += chunk_ms
+                        self.streaming_client.send_audio(chunk)
                         silence_count += 1
                         if silence_count % 10 == 0:
                             print(".", end="", flush=True)
+
+                        if stream_silence_ms >= STREAM_END_SILENCE_MS:
+                            streaming_active = False
+                            stream_silence_ms = 0.0
+                            print("\n⏸ stream paused (long silence)", flush=True)
+
+                    else:
+                        # Idle — waiting for speech to start
+                        silence_count += 1
+                        if silence_count % 10 == 0:
+                            print(".", end="", flush=True)
+
                 else:
                     # ── HTTP POST fallback (original behaviour) ──────────
                     if is_complete and speech_data:

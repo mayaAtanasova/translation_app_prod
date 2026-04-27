@@ -310,6 +310,17 @@ async def receive_audio_chunk(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _split_at_comma(text: str) -> str:
+    """
+    Return text up to the last comma, so provisional TTS ends at a natural
+    clause boundary. Falls back to the full text if no suitable comma exists.
+    """
+    last_comma = text.rfind(',')
+    if last_comma > 15:      # ignore commas too close to the start
+        return text[:last_comma].strip()
+    return text.strip()
+
+
 async def broadcast_interim_translation(lang_code: str, lang_info: dict, transcript: str):
     """Translate and broadcast an interim result — no TTS, no file I/O."""
     try:
@@ -403,7 +414,6 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
             enable_automatic_punctuation=True,
         ),
         interim_results=True,
-        single_utterance=True,  # return a final result at each natural pause, then restart
     )
 
     def stt_worker():
@@ -476,8 +486,17 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
             audio_q.put(None)   # signal STT thread to stop
 
     async def process_results():
+        PROVISIONAL_TIMEOUT = 4   # seconds since last is_final before forcing interim
+
         chunk_counter = 0
         last_interim_words = 0
+        last_interim_text = ""
+        # Tracks chars of the current Google utterance already provisionally
+        # processed, so the eventual is_final only TTSes the remainder.
+        provisional_offset = 0
+        # Wall-clock time of the last is_final (or startup) — provisional fires
+        # when an interim arrives and this is more than PROVISIONAL_TIMEOUT ago.
+        last_final_time = loop.time()
 
         while True:
             result = await result_q.get()
@@ -489,25 +508,51 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 continue
 
             if result["is_final"]:
+                # Only TTS the part not already provisionally sent
+                remaining = transcript[provisional_offset:].strip()
                 chunk_counter += 1
                 chunk_id = f"s{chunk_counter:03d}"
                 last_interim_words = 0
+                last_interim_text = ""
+                provisional_offset = 0
+                last_final_time = loop.time()
                 logger.info(f"Final transcript [{device_id}]: {transcript}")
 
-                await asyncio.gather(*[
-                    process_language_streaming(lang_code, lang_info, transcript, chunk_id, session_id)
-                    for lang_code, lang_info in TARGET_LANGUAGES.items()
-                ])
-            else:
-                # Throttle interim translations: only re-translate every 3 new words
-                word_count = len(transcript.split())
-                if word_count >= last_interim_words + 3:
-                    last_interim_words = word_count
-                    logger.debug(f"Interim [{device_id}]: {transcript}")
+                if remaining:
                     await asyncio.gather(*[
-                        broadcast_interim_translation(lang_code, lang_info, transcript)
+                        process_language_streaming(lang_code, lang_info, remaining, chunk_id, session_id)
                         for lang_code, lang_info in TARGET_LANGUAGES.items()
                     ])
+                else:
+                    logger.info(f"Final transcript [{device_id}] fully covered by provisional chunks")
+            else:
+                last_interim_text = transcript
+                remaining = transcript[provisional_offset:].strip()
+
+                # Provisional: fire when an interim arrives and we haven't had
+                # a final result for PROVISIONAL_TIMEOUT seconds
+                if loop.time() - last_final_time >= PROVISIONAL_TIMEOUT and remaining:
+                    provisional = _split_at_comma(remaining)
+                    chunk_counter += 1
+                    chunk_id = f"p{chunk_counter:03d}"
+                    logger.info(f"Provisional transcript [{device_id}]: {provisional}")
+                    provisional_offset += len(provisional)
+                    last_final_time = loop.time()   # reset so next provisional waits another N secs
+                    last_interim_words = 0
+                    await asyncio.gather(*[
+                        process_language_streaming(lang_code, lang_info, provisional, chunk_id, session_id)
+                        for lang_code, lang_info in TARGET_LANGUAGES.items()
+                    ])
+                else:
+                    # Normal interim throttle: re-translate every 3 new words
+                    word_count = len(remaining.split())
+                    if word_count >= last_interim_words + 3:
+                        last_interim_words = word_count
+                        logger.debug(f"Interim [{device_id}]: {remaining}")
+                        await asyncio.gather(*[
+                            broadcast_interim_translation(lang_code, lang_info, remaining)
+                            for lang_code, lang_info in TARGET_LANGUAGES.items()
+                        ])
 
     stt_future = loop.run_in_executor(None, stt_worker)
     await asyncio.gather(receive_audio(), process_results())

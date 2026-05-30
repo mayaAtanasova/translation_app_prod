@@ -10,3 +10,6 @@ numpy
 
 # HTTP client
 requests==2.31.0
+
+# WebSocket streaming (for low-latency STT mode)
+websocket-client==1.7.0

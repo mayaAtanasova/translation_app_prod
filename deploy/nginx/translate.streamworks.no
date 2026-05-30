@@ -1,0 +1,88 @@
+# =============================================================================
+# Nginx configuration for translate.streamworks.no
+# Phase 1: HTTP only. Run certbot to activate HTTPS (see deploy/README.md).
+# Deploy to: /etc/nginx/sites-available/translate.streamworks.no
+# Enable with: ln -s /etc/nginx/sites-available/translate.streamworks.no \
+#                     /etc/nginx/sites-enabled/translate.streamworks.no
+# =============================================================================
+
+# Rate limiting — 10 req/s per IP, burst 20
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name translate.streamworks.no;
+
+    # --- After DNS propagates, run: sudo certbot --nginx -d translate.streamworks.no
+    # Certbot will automatically add the HTTPS redirect and 443 block.
+
+    access_log /var/log/nginx/translate.streamworks.no.access.log;
+    error_log  /var/log/nginx/translate.streamworks.no.error.log warn;
+
+    # Pi audio chunks can be up to ~320KB (10s at 16kHz/16-bit); 5MB is generous
+    client_max_body_size 5M;
+
+    # --- Static files: served by Nginx directly (faster than going through uvicorn)
+    location /static/ {
+        alias /home/sw/translation_app/backend/static/;
+        expires 1h;
+        add_header Cache-Control "public";
+        add_header X-Content-Type-Options "nosniff";
+    }
+
+    # --- Audio files: served by Nginx directly
+    # App stores: data/sessions/{session_id}/chunks/{filename}
+    # App serves: /audio/{session_id}/{filename}
+    location /audio/ {
+        alias /home/sw/translation_app/backend/data/sessions/;
+        rewrite ^/audio/([^/]+)/(.+)$ /$1/chunks/$2 break;
+        expires off;
+        add_header Cache-Control "no-cache";
+        types { audio/mpeg mp3; }
+    }
+
+    # --- WebSocket endpoints (Pi streaming + browser listeners)
+    # Requires Upgrade headers — must be a separate location block
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8000;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket connections are long-lived (hours)
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_connect_timeout 10s;
+
+        # Must be off — WebSocket frames must pass through immediately
+        proxy_buffering off;
+    }
+
+    # --- Everything else → uvicorn
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # STT+translate+TTS pipeline can take up to ~10s
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_connect_timeout 5s;
+
+        limit_req zone=api_limit burst=20 nodelay;
+
+        add_header X-Frame-Options "SAMEORIGIN";
+        add_header X-Content-Type-Options "nosniff";
+    }
+}

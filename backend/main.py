@@ -17,6 +17,8 @@ import asyncio
 import queue as thread_queue
 from typing import Dict, Set
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 
 # Google Cloud imports
 from google.cloud import speech_v1
@@ -37,16 +39,17 @@ app = FastAPI(title="Translation System Backend", version="1.0.0")
 # CORS middleware for web clients
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For MVP, allow all. Restrict in production.
+    allow_origins=os.getenv("CORS_ALLOWED_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Configuration
-DATA_DIR = Path("./data")
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 SESSIONS_DIR = DATA_DIR / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR = os.getenv("STATIC_DIR", "static")
 
 # Target languages for MVP
 TARGET_LANGUAGES = {
@@ -631,14 +634,16 @@ async def create_new_session():
     return {"session_id": session_id}
 
 # Serve frontend
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/app")
 async def serve_frontend():
-    return FileResponse("static/index.html")
+    return FileResponse(f"{STATIC_DIR}/index.html")
 
 
 if __name__ == "__main__":
-    # Run with: python main.py
-    # Or: uvicorn main:app --reload --host 0.0.0.0 --port 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host=os.getenv("APP_HOST", "0.0.0.0"),
+        port=int(os.getenv("APP_PORT", "8000")),
+    )

@@ -13,3 +13,8 @@ google-cloud-texttospeech==2.14.2
 
 # Utilities
 python-dotenv==1.0.0
+
+# Database (Phase 2 — not yet wired to app)
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+alembic==1.13.1

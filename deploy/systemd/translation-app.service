@@ -1,0 +1,42 @@
+[Unit]
+Description=Streamworks Translation App (FastAPI + uvicorn)
+After=network.target
+
+[Service]
+User=sw
+Group=sw
+WorkingDirectory=/home/sw/translation_app/backend
+
+# Load all env vars from .env (must exist before starting)
+EnvironmentFile=/home/sw/translation_app/backend/.env
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+
+# --workers 1 is required: active_connections and current_session_id are
+# in-process Python state. Multiple workers = isolated processes = broken
+# WebSocket broadcast. Revisit after moving state to the database.
+ExecStart=/home/sw/translation_app/backend/venv/bin/uvicorn \
+    main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info \
+    --access-log \
+    --no-use-colors
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sw/translation_app/backend/data
+ReadWritePaths=/home/sw/translation_app/backend/static
+ReadOnlyPaths=/home/sw/translation_app/backend/config
+
+[Install]
+WantedBy=multi-user.target

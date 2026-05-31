@@ -32,6 +32,11 @@ config.local.json
 config*
 video-cnference*
 
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.template
+
 # Logs
 *.log
 

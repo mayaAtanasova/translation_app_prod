@@ -1,0 +1,12 @@
+# Allows sw to manage the translation app service and nginx without a password.
+# Deploy to: /etc/sudoers.d/translation-app
+# Must be owned by root:root with mode 0440:
+#   sudo chown root:root /etc/sudoers.d/translation-app
+#   sudo chmod 0440 /etc/sudoers.d/translation-app
+
+sw ALL=(ALL) NOPASSWD: /bin/systemctl start translation-app
+sw ALL=(ALL) NOPASSWD: /bin/systemctl stop translation-app
+sw ALL=(ALL) NOPASSWD: /bin/systemctl restart translation-app
+sw ALL=(ALL) NOPASSWD: /bin/systemctl status translation-app
+sw ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
+sw ALL=(ALL) NOPASSWD: /bin/systemctl restart nginx

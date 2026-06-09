@@ -259,7 +259,7 @@ class TranslationClient:
         print("Testing backend connection...")
         
         try:
-            response = requests.get(f"{self.backend_url}/", timeout=5)
+            response = requests.get(f"{self.backend_url}/health", timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 print(f"✓ Backend connected: {data}")

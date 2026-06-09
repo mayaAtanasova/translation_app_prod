@@ -32,7 +32,7 @@ except ImportError:
 # Configuration
 class Config:
     # Backend server
-    BACKEND_URL = "http://192.168.1.100:8000"  # Change to your Mac Mini IP
+    BACKEND_URL = "https://translate.streamworks.no"
     
     # Audio settings
     SAMPLE_RATE = 16000

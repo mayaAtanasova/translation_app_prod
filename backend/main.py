@@ -7,7 +7,7 @@ Handles audio chunks from Raspberry Pi devices and serves translations to web cl
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 import uvicorn
 import json
 import os
@@ -168,7 +168,10 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
+    return RedirectResponse(url="/app")
+
+@app.get("/health")
+async def health():
     return {
         "status": "running",
         "session": current_session_id,

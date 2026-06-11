@@ -14,6 +14,10 @@ google-cloud-texttospeech==2.14.2
 # Utilities
 python-dotenv==1.0.0
 
+# Transcript processor (requires system ffmpeg: sudo apt install ffmpeg)
+python-docx==1.1.2
+pydub==0.25.1
+
 # Database (Phase 2 — not yet wired to app)
 sqlalchemy==2.0.25
 psycopg2-binary==2.9.9

@@ -99,9 +99,13 @@ def paragraph_is_bold(para: DocxParagraph) -> bool:
     return bool(runs) and all(r.bold for r in runs)
 
 
-def is_stage_direction(text: str) -> bool:
-    text = text.strip()
-    return text.startswith('(') and text.endswith(')')
+# Matches any content inside (...) or [...] — always stage directions in rundowns
+_STAGE_DIR_RE = re.compile(r'\[.*?\]|\(.*?\)', re.DOTALL)
+
+def strip_stage_directions(text: str) -> str:
+    """Remove all (...) and [...] blocks from text, collapse extra whitespace."""
+    cleaned = _STAGE_DIR_RE.sub('', text)
+    return re.sub(r'\s+', ' ', cleaned).strip()
 
 
 def get_voice_gender(name: str) -> str:
@@ -181,20 +185,21 @@ def parse_content_paragraphs(paragraphs: list[DocxParagraph]) -> list[dict]:
     current_gender = 'female'
 
     for para in paragraphs:
-        text = para.text.strip()
-        if not text:
+        raw = para.text.strip()
+        if not raw:
             continue
         # Bold paragraph → skip entirely (clarification title or speaker name label)
         if paragraph_is_bold(para):
-            # If it looks like a name, update the voice for following text
-            words = text.split()
+            words = raw.split()
             if 1 <= len(words) <= 3 and all(w[0].isupper() for w in words if w):
                 current_gender = get_voice_gender(words[0])
             continue
-        # Stage direction → skip
-        if is_stage_direction(text):
+        # Strip (...) and [...] stage directions from the line
+        text = strip_stage_directions(raw)
+        if not text:
             continue
         # "Name: text" pattern → voice switch, translate only the text part
+        # Also handles "Name (stage dir): text" after stripping, e.g. "Ivan (off): Hello"
         match = NAME_COLON_RE.match(text)
         if match:
             name = match.group(1).strip()

@@ -67,8 +67,8 @@ P_TAG = qn('w:p')
 # ── Timestamp / duration helpers ──────────────────────────────────────────────
 
 def parse_timestamp(ts_str: str) -> float:
-    """Parse HH:MM:SS or HH:MM into seconds since midnight."""
-    ts_str = ts_str.strip()
+    """Parse HH:MM:SS or HH:MM into seconds since midnight. Tolerates spaces."""
+    ts_str = ts_str.strip().replace(' ', '')
     parts = ts_str.split(':')
     if len(parts) == 3:
         h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
@@ -114,34 +114,61 @@ def get_voice_gender(name: str) -> str:
 
 # ── Rundown table parsing ─────────────────────────────────────────────────────
 
-def parse_table_row(table: DocxTable) -> dict | None:
+def extract_type(item_str: str) -> str:
     """
-    Parse a single rundown table row.
-    Expected columns: number | type | timestamp | duration | title
-    Returns None if the table doesn't look like a rundown row.
+    Extract the canonical type keyword from an Item cell.
+    'VIDEO - VB3', 'VIDEO– VB4', 'VIDEO- VB 3 Intro' → 'video'
+    'Stinger' → 'stinger', 'VIGNETTE' → 'vignette', 'Bumper' → 'bumper'
     """
-    if not table.rows:
-        return None
-    cells = [c.text.strip() for c in table.rows[0].cells]
+    s = item_str.lower().strip()
+    for keyword in ('video', 'vignette', 'stinger', 'bumper'):
+        if s.startswith(keyword):
+            return keyword
+    return s  # fallback: return full string
+
+
+def parse_row_cells(cells: list[str]) -> dict | None:
+    """
+    Parse one rundown row from a list of cell text values.
+    Expected: [number, item/type, timestamp, duration, title, ...]
+    Returns None if cells don't look like a valid rundown row.
+    """
     if len(cells) < 5:
         return None
-    # Validate: first cell should be a number
-    if not cells[0].isdigit():
+    if not cells[0].strip().isdigit():
         return None
-    # Validate: third cell should parse as a timestamp
     try:
         ts = parse_timestamp(cells[2])
     except (ValueError, IndexError):
         return None
     return {
-        'number': int(cells[0]),
-        'type': cells[1].lower().strip(),
+        'number': int(cells[0].strip()),
+        'type': extract_type(cells[1]),
         'timestamp_s': ts,
         'duration_s': parse_duration(cells[3]),
-        'title': cells[4],
+        'title': cells[4].split('\n')[0].strip(),  # first line only as title
         'utterances': [],
-        'slot_ms': 0,   # filled in after all rows are collected
+        'slot_ms': 0,
     }
+
+
+def parse_table_rows(table: DocxTable) -> list[dict]:
+    """
+    Parse all valid rundown rows from a table (handles single and multi-row tables).
+    For multi-row tables, content in extra cell paragraphs is also extracted.
+    """
+    results = []
+    for row in table.rows:
+        cells_text = [c.text.strip() for c in row.cells]
+        seg = parse_row_cells(cells_text)
+        if not seg:
+            continue
+        # For multi-row tables: content may live in extra paragraphs of the last cell
+        last_cell = row.cells[-1]
+        if len(last_cell.paragraphs) > 1:
+            seg['utterances'] = parse_content_paragraphs(last_cell.paragraphs[1:])
+        results.append(seg)
+    return results
 
 # ── Content paragraph parsing ─────────────────────────────────────────────────
 
@@ -183,7 +210,7 @@ def parse_content_paragraphs(paragraphs: list[DocxParagraph]) -> list[dict]:
 
 # ── Full document parse ───────────────────────────────────────────────────────
 
-def parse_rundown(docx_path: Path) -> list[dict]:
+def parse_rundown(docx_path: Path, debug: bool = False) -> list[dict]:
     """
     Parse the rundown .docx into an ordered list of segments.
     Each segment has type, timestamp, slot_ms, utterances.
@@ -195,25 +222,36 @@ def parse_rundown(docx_path: Path) -> list[dict]:
 
     def flush():
         if current_seg is not None and pending_paras:
-            current_seg['utterances'] = parse_content_paragraphs(pending_paras)
+            parsed = parse_content_paragraphs(pending_paras)
+            # Only overwrite if we found something (cell-level content takes precedence)
+            if parsed:
+                current_seg['utterances'] = parsed
 
     for child in doc.element.body:
         if child.tag == TBL_TAG:
             flush()
             pending_paras = []
             table = DocxTable(child, doc)
-            seg = parse_table_row(table)
-            if seg:
-                current_seg = seg
-                segments.append(seg)
+            rows = parse_table_rows(table)
+            if debug:
+                print(f"  [TABLE] {len(table.rows)} rows → {len(rows)} valid segments parsed")
+                for r in rows:
+                    print(f"    row {r['number']}: type={r['type']!r}  ts={r['timestamp_s']}s  utterances={len(r['utterances'])}")
+            if rows:
+                segments.extend(rows)
+                current_seg = rows[-1]
         elif child.tag == P_TAG:
+            para = DocxParagraph(child, doc)
+            text = para.text.strip()
+            if debug and text:
+                bold = paragraph_is_bold(para)
+                print(f"  [PARA ] bold={bold}  {text[:70]!r}")
             if current_seg is not None:
-                para = DocxParagraph(child, doc)
                 pending_paras.append(para)
 
     flush()
 
-    # Calculate slot_ms for each segment from the delta to the next row's timestamp
+    # Calculate slot_ms from timestamp deltas
     for i, seg in enumerate(segments):
         if i + 1 < len(segments):
             delta_s = segments[i + 1]['timestamp_s'] - seg['timestamp_s']
@@ -354,6 +392,10 @@ def main():
         '--dry-run', action='store_true',
         help='Parse and preview what would be translated — no API calls',
     )
+    parser.add_argument(
+        '--debug', action='store_true',
+        help='Print every table and paragraph found during parsing',
+    )
     args = parser.parse_args()
 
     docx_path = Path(args.docx)
@@ -362,7 +404,11 @@ def main():
         sys.exit(1)
 
     print(f"\nParsing: {docx_path.name}")
-    segments = parse_rundown(docx_path)
+    if args.debug:
+        print("── DEBUG output ──────────────────────────────────────────────")
+    segments = parse_rundown(docx_path, debug=args.debug)
+    if args.debug:
+        print("─────────────────────────────────────────────────────────────\n")
 
     if args.dry_run:
         dry_run(segments)

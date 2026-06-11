@@ -198,6 +198,10 @@ def parse_content_paragraphs(paragraphs: list[DocxParagraph]) -> list[dict]:
         text = strip_stage_directions(raw)
         if not text:
             continue
+        # "Name:" alone — stage direction stripped everything after colon → voice switch only
+        if re.match(r'^[A-ZÆØÅÄÖÜ][a-zA-ZÆØÅÄÖÜæøåäöü]{1,20}(?:\s[A-ZÆØÅÄÖÜ][a-zA-ZÆØÅÄÖÜæøåäöü]{1,20}){0,2}:$', text):
+            current_gender = get_voice_gender(text[:-1].strip())
+            continue
         # "Name: text" pattern → voice switch, translate only the text part
         # Also handles "Name (stage dir): text" after stripping, e.g. "Ivan (off): Hello"
         match = NAME_COLON_RE.match(text)
@@ -301,6 +305,14 @@ def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
 
 # ── Audio assembly ────────────────────────────────────────────────────────────
 
+def trim_to_first_translatable(segments: list[dict]) -> list[dict]:
+    """Drop all leading segments before the first translatable one with utterances."""
+    for i, seg in enumerate(segments):
+        if seg['type'] in TRANSLATABLE_TYPES and seg.get('utterances'):
+            return segments[i:]
+    return segments
+
+
 def build_language_audio(
     segments: list[dict],
     lang_key: str,
@@ -401,6 +413,10 @@ def main():
         '--debug', action='store_true',
         help='Print every table and paragraph found during parsing',
     )
+    parser.add_argument(
+        '--trim-start', action='store_true',
+        help='Skip silence before the first translatable segment (removes pre-show slots)',
+    )
     args = parser.parse_args()
 
     docx_path = Path(args.docx)
@@ -414,6 +430,8 @@ def main():
     segments = parse_rundown(docx_path, debug=args.debug)
     if args.debug:
         print("─────────────────────────────────────────────────────────────\n")
+    if args.trim_start:
+        segments = trim_to_first_translatable(segments)
 
     if args.dry_run:
         dry_run(segments)

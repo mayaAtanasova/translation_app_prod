@@ -297,6 +297,43 @@ def build_language_audio(
 
     return timeline
 
+# ── Dry run ───────────────────────────────────────────────────────────────────
+
+def dry_run(segments: list[dict]) -> None:
+    """Print a summary of what would be translated without calling any APIs."""
+    print("\n── DRY RUN — no API calls made " + "─" * 35)
+    translatable_count = 0
+    utterance_count = 0
+
+    for seg in segments:
+        slot_s = seg['slot_ms'] / 1000
+        seg_type = seg['type']
+        utterances = seg.get('utterances', [])
+
+        if seg_type not in TRANSLATABLE_TYPES:
+            print(f"  [{seg['number']:>3}] SKIP  {seg_type:<10}  slot={slot_s:.0f}s")
+            continue
+
+        if not utterances:
+            print(f"  [{seg['number']:>3}] EMPTY {seg_type:<10}  slot={slot_s:.0f}s  \"{seg['title'][:40]}\"")
+            continue
+
+        translatable_count += 1
+        print(f"\n  [{seg['number']:>3}] {seg_type.upper():<10}  slot={slot_s:.0f}s  \"{seg['title'][:40]}\"")
+        for utt in utterances:
+            utterance_count += 1
+            speaker = f"[{utt['gender']}]"
+            preview = utt['text'][:80].replace('\n', ' ')
+            ellipsis = '…' if len(utt['text']) > 80 else ''
+            print(f"         {speaker}  {preview}{ellipsis}")
+
+    print(f"\n── Summary " + "─" * 50)
+    print(f"  Translatable segments : {translatable_count}")
+    print(f"  Utterances to process : {utterance_count}")
+    total_s = sum(s['slot_ms'] for s in segments) / 1000
+    print(f"  Total timeline        : {total_s/60:.1f} minutes")
+    print()
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 def main():
@@ -310,18 +347,27 @@ def main():
         choices=list(LANGUAGES.keys()),
         help='Target languages (default: cs sv)',
     )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Parse and preview what would be translated — no API calls',
+    )
     args = parser.parse_args()
 
     docx_path = Path(args.docx)
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     if not docx_path.exists():
         print(f"Error: file not found: {docx_path}")
         sys.exit(1)
 
     print(f"\nParsing: {docx_path.name}")
     segments = parse_rundown(docx_path)
+
+    if args.dry_run:
+        dry_run(segments)
+        return
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     translatable = [s for s in segments if s['type'] in TRANSLATABLE_TYPES and s['utterances']]
     total_s = sum(s['slot_ms'] for s in segments) / 1000
     print(f"Rows: {len(segments)} total, {len(translatable)} with translatable content")

@@ -80,12 +80,15 @@ def parse_timestamp(ts_str: str) -> float:
 
 
 def parse_duration(dur_str: str) -> int:
-    """Parse '1m', '2m', '30s' etc. into seconds."""
-    dur_str = dur_str.strip().lower()
-    if dur_str.endswith('m'):
-        return int(dur_str[:-1]) * 60
-    if dur_str.endswith('s'):
-        return int(dur_str[:-1])
+    """Parse '1m', '30s', '1m30', '1m30s' etc. into seconds."""
+    dur_str = dur_str.strip().lower().rstrip('s')  # strip trailing 's' if present
+    if 'm' in dur_str:
+        parts = dur_str.split('m')
+        minutes = int(parts[0])
+        seconds = int(parts[1]) if parts[1] else 0
+        return minutes * 60 + seconds
+    if dur_str.isdigit():
+        return int(dur_str)
     return 0
 
 # ── Paragraph analysis ────────────────────────────────────────────────────────

@@ -129,10 +129,13 @@ def synthesize_clip(text: str, lang_cfg: dict, tts_client) -> AudioSegment:
 
 
 def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
-    """Speed up only if audio exceeds the slot. No silence padding — gaps handle spacing."""
+    """Speed up if audio exceeds slot; pad with silence if shorter to match source timing."""
     if len(audio) > slot_ms:
         rate = len(audio) / slot_ms
         audio = speedup(audio, playback_speed=rate, chunk_size=150, crossfade=25)
+    gap = slot_ms - len(audio)
+    if gap > 0:
+        audio = audio + AudioSegment.silent(duration=gap)
     return audio
 
 # ── Timeline assembly ─────────────────────────────────────────────────────────
@@ -144,17 +147,16 @@ def build_language_audio(
     tts_client,
     trim_start: bool = False,
 ) -> AudioSegment:
-    timeline = AudioSegment.empty()
-    origin   = segments[0]['start'] if trim_start else 0.0
-    total    = len(segments)
-    cursor_s = 0.0
+    timeline        = AudioSegment.empty()
+    origin          = segments[0]['start'] if trim_start else 0.0
+    total           = len(segments)
+    prev_source_end = origin  # tracks end of previous segment in source time
 
     for i, seg in enumerate(segments, 1):
-        seg_start_s = seg['start'] - origin
-        slot_ms     = int(seg['duration'] * 1000)
+        slot_ms = int(seg['duration'] * 1000)
 
-        # Silence gap between end of previous segment and start of this one
-        gap_ms = int((seg_start_s - cursor_s) * 1000)
+        # Gap between end of previous segment and start of this one (source time)
+        gap_ms = int((seg['start'] - prev_source_end) * 1000)
         if gap_ms > 0:
             timeline += AudioSegment.silent(duration=gap_ms)
 
@@ -168,8 +170,7 @@ def build_language_audio(
             print(f"    ⚠ Skipped: {exc}")
             timeline += AudioSegment.silent(duration=slot_ms)
 
-        # Advance cursor to end of this segment's slot in the source timeline
-        cursor_s = seg_start_s + seg['duration']
+        prev_source_end = seg['end']  # use source end time, not start + duration
 
     return timeline
 

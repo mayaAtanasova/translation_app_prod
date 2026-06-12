@@ -129,8 +129,9 @@ def build_language_audio(
     origin = segments[0]['start'] if trim_start else 0.0
 
     cursor_s = 0.0  # current position in output timeline (seconds from origin)
+    total = len(segments)
 
-    for seg in segments:
+    for i, seg in enumerate(segments, 1):
         seg_start_s = seg['start'] - origin
         slot_ms = int(seg['duration'] * 1000)
 
@@ -139,12 +140,14 @@ def build_language_audio(
         if gap_ms > 0:
             timeline += AudioSegment.silent(duration=gap_ms)
 
+        print(f"  [{i:>3}/{total}]  {seg['start']:.1f}s  {seg['text'][:55]}", flush=True)
+
         try:
             translated = translate_text(seg['text'], lang_cfg['translate_code'], translate_client)
             clip = synthesize_clip(translated, lang_cfg, tts_client)
             timeline += fit_to_slot(clip, slot_ms)
         except Exception as exc:
-            print(f"    ⚠ Skipped segment at {seg['start']:.1f}s: {exc}")
+            print(f"    ⚠ Skipped: {exc}")
             timeline += AudioSegment.silent(duration=slot_ms)
 
         cursor_s = seg_start_s + seg['duration']

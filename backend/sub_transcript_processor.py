@@ -182,11 +182,59 @@ def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
     if len(audio) > slot_ms:
         rate = len(audio) / slot_ms
         audio = speedup(audio, playback_speed=rate, chunk_size=150, crossfade=25)
-        audio = audio[:slot_ms]  # enforce exact length — speedup chunking is imprecise
+        audio = audio[:slot_ms]
     gap = slot_ms - len(audio)
     if gap > 0:
         audio = audio + AudioSegment.silent(duration=gap)
     return audio
+
+
+# Splits translated text at sentence boundaries, keeping punctuation with each sentence
+_SPLIT_RE = re.compile(r'(?<=[.?!]["\']?)\s+')
+
+def synthesize_with_extended_pauses(
+    translated: str,
+    slot_ms: int,
+    lang_cfg: dict,
+    tts_client,
+    spare_threshold_ms: int,
+) -> AudioSegment:
+    """
+    If spare time > threshold and text has internal sentence boundaries,
+    generate TTS per sub-sentence and distribute spare time as pauses
+    between sentences instead of trailing silence.
+    """
+    sentences = [s for s in _SPLIT_RE.split(translated.strip()) if s.strip()]
+
+    if len(sentences) <= 1:
+        clip = synthesize_clip(translated, lang_cfg, tts_client)
+        return fit_to_slot(clip, slot_ms)
+
+    # Generate TTS per sentence to measure total duration
+    clips = [synthesize_clip(s, lang_cfg, tts_client) for s in sentences]
+    total_tts_ms = sum(len(c) for c in clips)
+    spare_ms = slot_ms - total_tts_ms
+
+    if spare_ms <= spare_threshold_ms:
+        # Not enough spare time — concatenate and fit normally
+        combined = sum(clips[1:], clips[0])
+        return fit_to_slot(combined, slot_ms)
+
+    # Distribute spare time equally across sentence boundaries
+    pause_ms = spare_ms // (len(sentences) - 1)
+    result = AudioSegment.empty()
+    for i, clip in enumerate(clips):
+        result += clip
+        if i < len(clips) - 1:
+            result += AudioSegment.silent(duration=pause_ms)
+
+    # Final trim/pad to exact slot length
+    if len(result) > slot_ms:
+        result = result[:slot_ms]
+    elif len(result) < slot_ms:
+        result = result + AudioSegment.silent(duration=slot_ms - len(result))
+    return result
+
 
 # ── Timeline assembly ─────────────────────────────────────────────────────────
 
@@ -196,6 +244,7 @@ def build_language_audio(
     translate_client,
     tts_client,
     trim_start: bool = False,
+    spare_threshold_ms: int = 0,  # 0 = disabled
 ) -> AudioSegment:
     timeline        = AudioSegment.empty()
     origin          = segments[0]['start'] if trim_start else 0.0
@@ -214,13 +263,19 @@ def build_language_audio(
 
         try:
             translated = translate_text(seg['text'], lang_cfg['translate_code'], translate_client)
-            clip       = synthesize_clip(translated, lang_cfg, tts_client)
-            timeline  += fit_to_slot(clip, slot_ms)
+            if spare_threshold_ms > 0:
+                clip = synthesize_with_extended_pauses(
+                    translated, slot_ms, lang_cfg, tts_client, spare_threshold_ms
+                )
+            else:
+                clip = synthesize_clip(translated, lang_cfg, tts_client)
+                clip = fit_to_slot(clip, slot_ms)
+            timeline += clip
         except Exception as exc:
             print(f"    ⚠ Skipped: {exc}")
             timeline += AudioSegment.silent(duration=slot_ms)
 
-        prev_source_end = seg['end']  # use source end time, not start + duration
+        prev_source_end = seg['end']
 
     return timeline
 
@@ -271,6 +326,11 @@ def main():
         '--merge-sentences', action='store_true',
         help='Merge segments that lack sentence-ending punctuation into the next one',
     )
+    parser.add_argument(
+        '--extend-pauses', type=float, default=0, metavar='SECONDS',
+        help='If TTS finishes more than SECONDS early and chunk has internal punctuation, '
+             'distribute spare time as pauses between sentences (e.g. --extend-pauses 2)',
+    )
     args = parser.parse_args()
 
     txt_path = Path(args.txt)
@@ -306,6 +366,7 @@ def main():
         audio = build_language_audio(
             segments, lang_cfg, translate_client, tts_client,
             trim_start=args.trim_start,
+            spare_threshold_ms=int(args.extend_pauses * 1000),
         )
         out_path = output_dir / f"{txt_path.stem}_{lang_key}.wav"
         audio.export(str(out_path), format='wav')

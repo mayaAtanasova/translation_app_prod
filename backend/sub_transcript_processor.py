@@ -126,6 +126,34 @@ def load_transcript(txt_path: Path, fps: int = 25) -> list[dict]:
     segments.sort(key=lambda s: s['start'])
     return segments
 
+
+SENTENCE_END_RE = re.compile(r'[.?!]["\']?\s*$')
+
+def merge_sentences(segments: list[dict]) -> list[dict]:
+    """
+    Merge consecutive segments that don't end with sentence-ending punctuation
+    (.  ?  !) into a single segment, combining their text and total duration.
+    """
+    merged = []
+    buffer: dict | None = None
+
+    for seg in segments:
+        if buffer is None:
+            buffer = dict(seg)
+        else:
+            buffer['text']     += ' ' + seg['text']
+            buffer['end']       = seg['end']
+            buffer['duration']  = buffer['end'] - buffer['start']
+
+        if SENTENCE_END_RE.search(buffer['text']):
+            merged.append(buffer)
+            buffer = None
+
+    if buffer is not None:  # flush any trailing incomplete segment
+        merged.append(buffer)
+
+    return merged
+
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
 def translate_text(text: str, target_lang: str, translate_client) -> str:
@@ -239,6 +267,10 @@ def main():
         '--trim-start', action='store_true',
         help='Start output at first segment (skip leading silence)',
     )
+    parser.add_argument(
+        '--merge-sentences', action='store_true',
+        help='Merge segments that lack sentence-ending punctuation into the next one',
+    )
     args = parser.parse_args()
 
     txt_path = Path(args.txt)
@@ -249,6 +281,10 @@ def main():
     print(f"\nLoading: {txt_path.name}  (fps={args.fps})")
     segments = load_transcript(txt_path, fps=args.fps)
     print(f"Segments parsed: {len(segments)}")
+
+    if args.merge_sentences:
+        segments = merge_sentences(segments)
+        print(f"After merging incomplete sentences: {len(segments)}")
 
     if not segments:
         print("No segments found. Check file format and encoding.")

@@ -190,7 +190,7 @@ def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
 
 
 # Splits translated text at sentence boundaries, keeping punctuation with each sentence
-_SPLIT_RE = re.compile(r'(?<=[.?!])\s+')
+_SPLIT_RE = re.compile(r'(?<=[.?!,])\s+')
 
 def synthesize_with_extended_pauses(
     translated: str,

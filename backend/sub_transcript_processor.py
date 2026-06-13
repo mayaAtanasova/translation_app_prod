@@ -50,6 +50,12 @@ LANGUAGES = {
         'tts_language': 'sv-SE',
         'voice': 'sv-SE-Wavenet-A',
     },
+    'bg': {
+        'name': 'Bulgarian',
+        'translate_code': 'bg',
+        'tts_language': 'bg-BG',
+        'voice': 'bg-BG-Standard-A',
+    },
 }
 
 # ── TXT parsing ───────────────────────────────────────────────────────────────
@@ -143,10 +149,12 @@ def synthesize_clip(text: str, lang_cfg: dict, tts_client) -> AudioSegment:
 
 
 def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
-    """Speed up if audio exceeds slot; pad with silence if shorter."""
+    """Speed up if audio exceeds slot; pad with silence if shorter.
+    Always trims to exact slot_ms to prevent drift accumulation."""
     if len(audio) > slot_ms:
         rate = len(audio) / slot_ms
         audio = speedup(audio, playback_speed=rate, chunk_size=150, crossfade=25)
+        audio = audio[:slot_ms]  # enforce exact length — speedup chunking is imprecise
     gap = slot_ms - len(audio)
     if gap > 0:
         audio = audio + AudioSegment.silent(duration=gap)

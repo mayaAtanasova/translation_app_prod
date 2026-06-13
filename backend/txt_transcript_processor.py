@@ -22,12 +22,14 @@ Usage:
 
 import argparse
 import io
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from pydub import AudioSegment
-from pydub.effects import speedup
 from dotenv import load_dotenv
 
 from google.cloud import texttospeech
@@ -128,15 +130,49 @@ def synthesize_clip(text: str, lang_cfg: dict, tts_client) -> AudioSegment:
     return AudioSegment.from_mp3(io.BytesIO(response.audio_content))
 
 
-def fit_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
-    """Speed up if audio exceeds slot; pad with silence if shorter to match source timing."""
-    if len(audio) > slot_ms:
-        rate = len(audio) / slot_ms
-        audio = speedup(audio, playback_speed=rate, chunk_size=150, crossfade=25)
-    gap = slot_ms - len(audio)
-    if gap > 0:
-        audio = audio + AudioSegment.silent(duration=gap)
-    return audio
+def stretch_to_slot(audio: AudioSegment, slot_ms: int) -> AudioSegment:
+    """
+    Time-stretch audio to fit exactly in slot_ms using ffmpeg atempo filter.
+    Handles both slowing down (rate < 1) and speeding up (rate > 1).
+    atempo must be chained for rates outside [0.5, 2.0].
+    Falls back to silence padding if slot_ms is too short to be meaningful.
+    """
+    if slot_ms < 100:
+        return audio  # slot too short to bother stretching
+
+    rate = len(audio) / slot_ms
+    if abs(rate - 1.0) < 0.05:
+        return audio  # within 5% — close enough, no stretch needed
+
+    # Clamp to a range that still sounds natural
+    rate = max(0.5, min(2.5, rate))
+
+    # Build atempo filter chain (each filter limited to [0.5, 2.0])
+    filters = []
+    r = rate
+    while r > 2.0:
+        filters.append('atempo=2.0')
+        r /= 2.0
+    while r < 0.5:
+        filters.append('atempo=0.5')
+        r *= 2.0
+    filters.append(f'atempo={r:.4f}')
+
+    tmp_in  = tempfile.mktemp(suffix='.wav')
+    tmp_out = tempfile.mktemp(suffix='.wav')
+    try:
+        audio.export(tmp_in, format='wav')
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', tmp_in, '-af', ','.join(filters), tmp_out],
+            check=True, capture_output=True,
+        )
+        return AudioSegment.from_wav(tmp_out)
+    except subprocess.CalledProcessError:
+        return audio  # if ffmpeg fails, return unmodified
+    finally:
+        for f in (tmp_in, tmp_out):
+            if os.path.exists(f):
+                os.unlink(f)
 
 # ── Timeline assembly ─────────────────────────────────────────────────────────
 
@@ -165,7 +201,7 @@ def build_language_audio(
         try:
             translated = translate_text(seg['text'], lang_cfg['translate_code'], translate_client)
             clip       = synthesize_clip(translated, lang_cfg, tts_client)
-            timeline  += fit_to_slot(clip, slot_ms)
+            timeline  += stretch_to_slot(clip, slot_ms)
         except Exception as exc:
             print(f"    ⚠ Skipped: {exc}")
             timeline += AudioSegment.silent(duration=slot_ms)

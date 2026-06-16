@@ -136,9 +136,15 @@ class AudioCapture:
         print("="*60)
     
     def select_device(self):
-        """Interactive device selection"""
+        """Select audio device. Auto-selects when not running in a terminal."""
         self.list_devices()
-        
+
+        if not sys.stdin.isatty():
+            # Running as a service — use default device without prompting
+            print("Running as service — using default audio input device.")
+            self.device_index = None
+            return
+
         while True:
             try:
                 choice = input("\nSelect device number (or press Enter for default): ").strip()
@@ -146,7 +152,7 @@ class AudioCapture:
                     self.device_index = None
                     print("Using default device")
                     break
-                
+
                 idx = int(choice)
                 info = self.audio.get_device_info_by_index(idx)
                 if info['maxInputChannels'] > 0:
@@ -347,9 +353,12 @@ class TranslationClient:
         """Main loop - capture audio and send to backend"""
         # Test backend
         if not self.test_backend_connection():
-            print("\n⚠️  Cannot connect to backend. Continue anyway? (y/n): ", end="")
-            if input().strip().lower() != 'y':
-                return
+            if sys.stdin.isatty():
+                print("\n⚠️  Cannot connect to backend. Continue anyway? (y/n): ", end="")
+                if input().strip().lower() != 'y':
+                    return
+            else:
+                print("⚠️  Cannot connect to backend. Running as service — continuing anyway.")
             print("⚠️  Running in offline mode - audio will be saved locally only\n")
         
         # Setup audio

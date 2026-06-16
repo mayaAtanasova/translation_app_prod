@@ -361,15 +361,19 @@ class TranslationClient:
                 print("⚠️  Cannot connect to backend. Running as service — continuing anyway.")
             print("⚠️  Running in offline mode - audio will be saved locally only\n")
         
-        # Setup audio
-        self.audio_capture = AudioCapture(device_index=Config.DEVICE_INDEX)
-        
-        if Config.DEVICE_INDEX is None:
-            self.audio_capture.select_device()
-        
-        if not self.audio_capture.start_stream():
-            print("✗ Failed to start audio capture")
-            return
+        # Setup audio — wait for device if not yet available (e.g. USB card not plugged in)
+        retry_interval = 5
+        while True:
+            try:
+                self.audio_capture = AudioCapture(device_index=Config.DEVICE_INDEX)
+                if Config.DEVICE_INDEX is None:
+                    self.audio_capture.select_device()
+                if self.audio_capture.start_stream():
+                    break
+                print(f"✗ Failed to start audio capture. Retrying in {retry_interval}s...")
+            except OSError as e:
+                print(f"✗ Audio device not available ({e}). Retrying in {retry_interval}s...")
+            time.sleep(retry_interval)
         
         print("\n✓ Ready to capture audio")
         print("Speak into the microphone. Press Ctrl+C to stop.\n")

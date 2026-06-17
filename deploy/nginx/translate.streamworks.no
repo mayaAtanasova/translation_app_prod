@@ -31,17 +31,6 @@ server {
         add_header X-Content-Type-Options "nosniff";
     }
 
-    # --- Audio files: served by Nginx directly
-    # App stores: data/sessions/{session_id}/chunks/{filename}
-    # App serves: /audio/{session_id}/{filename}
-    location /audio/ {
-        alias /home/sw/translation_app/backend/data/sessions/;
-        rewrite ^/audio/([^/]+)/(.+)$ /$1/chunks/$2 break;
-        expires off;
-        add_header Cache-Control "no-cache";
-        types { audio/mpeg mp3; }
-    }
-
     # --- WebSocket endpoints (Pi streaming + browser listeners)
     # Requires Upgrade headers — must be a separate location block
     location /ws/ {

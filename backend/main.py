@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Google Cloud imports
-from google.cloud import speech_v1
+from google.cloud.speech_v2 import SpeechClient as SpeechV2Client
+from google.cloud.speech_v2.types import cloud_speech
 from google.cloud import translate_v2 as translate
 from google.cloud import texttospeech
 
@@ -66,7 +67,9 @@ active_connections: Dict[str, Set[WebSocket]] = {
 }
 
 # Google Cloud clients
-stt_client = speech_v1.SpeechClient()
+stt_client = SpeechV2Client()
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
+STT_RECOGNIZER = f"projects/{GOOGLE_CLOUD_PROJECT}/locations/global/recognizers/_"
 translate_client = translate.Client()
 tts_client = texttospeech.TextToSpeechClient()
 
@@ -207,16 +210,25 @@ async def receive_audio_chunk(
         
         # Step 1: Speech-to-Text
         logger.info(f"Transcribing chunk {chunk_id}...")
-        
-        audio_content = speech_v1.RecognitionAudio(content=audio_data)
-        config = speech_v1.RecognitionConfig(
-            encoding=speech_v1.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
-            language_code="en-US",
-            enable_automatic_punctuation=True,
+
+        response = stt_client.recognize(
+            request=cloud_speech.RecognizeRequest(
+                recognizer=STT_RECOGNIZER,
+                config=cloud_speech.RecognitionConfig(
+                    explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                        encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                        sample_rate_hertz=16000,
+                        audio_channel_count=1,
+                    ),
+                    language_codes=["en-US"],
+                    model="chirp_2",
+                    features=cloud_speech.RecognitionFeatures(
+                        enable_automatic_punctuation=True,
+                    ),
+                ),
+                content=audio_data,
+            )
         )
-        
-        response = stt_client.recognize(config=config, audio=audio_content)
         
         if not response.results:
             logger.warning(f"No speech detected in chunk {chunk_id}")
@@ -412,14 +424,22 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
     # asyncio.Queue carries STT results back to the async result processor
     result_q: asyncio.Queue = asyncio.Queue()
 
-    streaming_config = speech_v1.StreamingRecognitionConfig(
-        config=speech_v1.RecognitionConfig(
-            encoding=speech_v1.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
-            language_code="en-US",
-            enable_automatic_punctuation=True,
+    streaming_recognition_config = cloud_speech.StreamingRecognitionConfig(
+        config=cloud_speech.RecognitionConfig(
+            explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                sample_rate_hertz=16000,
+                audio_channel_count=1,
+            ),
+            language_codes=["en-US"],
+            model="chirp_2",
+            features=cloud_speech.RecognitionFeatures(
+                enable_automatic_punctuation=True,
+            ),
         ),
-        interim_results=True,
+        streaming_features=cloud_speech.StreamingRecognitionFeatures(
+            interim_results=True,
+        ),
     )
 
     def stt_worker():
@@ -438,7 +458,12 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 break   # permanent stop from receive_audio()
 
             def request_gen():
-                yield speech_v1.StreamingRecognizeRequest(audio_content=first_chunk)
+                # v2 bidi-streaming: first request carries recognizer + config
+                yield cloud_speech.BidiStreamingRecognizeRequest(
+                    recognizer=STT_RECOGNIZER,
+                    streaming_config=streaming_recognition_config,
+                )
+                yield cloud_speech.BidiStreamingRecognizeRequest(audio=first_chunk)
                 while True:
                     try:
                         chunk = audio_q.get(timeout=STREAM_SILENCE_TIMEOUT)
@@ -448,10 +473,10 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                     if chunk is None:
                         audio_q.put(None)   # re-queue so outer loop sees the stop
                         return
-                    yield speech_v1.StreamingRecognizeRequest(audio_content=chunk)
+                    yield cloud_speech.BidiStreamingRecognizeRequest(audio=chunk)
 
             try:
-                for response in stt_client.streaming_recognize(streaming_config, request_gen()):
+                for response in stt_client.bidi_streaming_recognize(requests=request_gen()):
                     for result in response.results:
                         if not result.alternatives:
                             continue

@@ -197,9 +197,15 @@
     margin: 0 auto;
   }
 
-  /* Settled (past) chunks — grayed out */
+  /* Settled chunks — the TTS voice has passed them (or skipped them) */
   .chunk.settled {
     color: rgba(17,17,17,0.28);
+    transition: color 0.6s ease;
+  }
+
+  /* Committed chunks — final text, not yet spoken by TTS */
+  .chunk.committed {
+    color: var(--text);
     transition: color 0.6s ease;
   }
 
@@ -518,11 +524,18 @@ function handleMessage(msg) {
     loadManifest(sessionId);
   } else if (msg.type === 'translation') {
     if (!msg.translation || !msg.translation.trim()) return;
-    /* Commit text immediately — captions are not paced by audio */
+    /* Commit text immediately — captions are not paced by audio.
+       The chunk stays black until its TTS clip has played (or been
+       skipped), then settles to grey. */
     clearInterim();
-    appendSettled(msg.translation.trim());
+    const span = appendCommitted(msg.translation.trim());
     scrollToBottom();
-    if (msg.audio_url) enqueueAudio(msg);
+    if (msg.audio_url) {
+      msg._span = span;
+      enqueueAudio(msg);
+    } else {
+      settleChunk(span);
+    }
   } else if (msg.type === 'interim') {
     if (!msg.translation || !msg.translation.trim()) return;
     showInterim(msg.translation.trim());
@@ -578,14 +591,28 @@ async function loadManifest(sid) {
    Append a chunk as already-settled text (no animation)
    ───────────────────────────────────────────────────── */
 function appendSettled(text) {
+  const span = appendCommitted(text);
+  settleChunk(span);
+}
+
+/* ─────────────────────────────────────────────────────
+   Append a final chunk in black; settles to grey once
+   its audio has played or been skipped
+   ───────────────────────────────────────────────────── */
+function appendCommitted(text) {
   hideEmptyHint();
   const span = document.createElement('span');
-  span.className = 'chunk settled';
+  span.className = 'chunk committed';
   span.textContent = text;
   textBody.appendChild(span);
   textBody.appendChild(document.createTextNode(' '));
   totalWords += countWords(text);
   trimToWordLimit();
+  return span;
+}
+
+function settleChunk(span) {
+  span.className = 'chunk settled';
 }
 
 /* ─────────────────────────────────────────────────────
@@ -601,7 +628,10 @@ function enqueueAudio(item) {
 function playNextAudio() {
   /* If audio has backed up beyond the limit, skip the oldest clips —
      their text is already on screen, nothing is lost. */
-  while (audioQueue.length > MAX_AUDIO_QUEUE) audioQueue.shift();
+  while (audioQueue.length > MAX_AUDIO_QUEUE) {
+    const skipped = audioQueue.shift();
+    if (skipped._span) settleChunk(skipped._span);
+  }
   updateQueueInfo();
 
   if (audioQueue.length === 0) { audioPlaying = false; return; }
@@ -619,9 +649,13 @@ function playNextAudio() {
   audio.playbackRate = rate;
   currentAudio = audio;
 
-  audio.onended = playNextAudio;
-  audio.onerror = playNextAudio;
-  audio.play().catch(playNextAudio);
+  const done = () => {
+    if (item._span) settleChunk(item._span);
+    playNextAudio();
+  };
+  audio.onended = done;
+  audio.onerror = done;
+  audio.play().catch(done);
 }
 
 /* ─────────────────────────────────────────────────────
@@ -637,7 +671,7 @@ function countWords(text) {
 
 function trimToWordLimit() {
   while (totalWords > WORD_LIMIT) {
-    const oldest = textBody.querySelector('.chunk.settled');
+    const oldest = textBody.querySelector('.chunk.settled, .chunk.committed');
     if (!oldest) break;
     const w = countWords(oldest.textContent);
     /* Remove the trailing space text node too */

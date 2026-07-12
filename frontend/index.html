@@ -405,13 +405,13 @@ let sessionId       = null;
 let intentionalClose = false;
 let pingInterval    = null;
 
-const queue         = [];
-let isProcessing    = false;
+const audioQueue    = [];
+let audioPlaying    = false;
 let currentAudio    = null;
 let totalWords      = 0;
 let interimSpan     = null;   /* live interim translation span */
 const WORD_LIMIT    = 300;
-const MAX_QUEUE_DEPTH = 4; /* flush stale items as text-only beyond this depth */
+const MAX_AUDIO_QUEUE = 4; /* skip oldest audio beyond this depth (text is already on screen) */
 
 function getPlaybackRate(queueDepth) {
   if (queueDepth <= 0) return 1.0;
@@ -518,8 +518,11 @@ function handleMessage(msg) {
     loadManifest(sessionId);
   } else if (msg.type === 'translation') {
     if (!msg.translation || !msg.translation.trim()) return;
+    /* Commit text immediately — captions are not paced by audio */
     clearInterim();
-    enqueue(msg);
+    appendSettled(msg.translation.trim());
+    scrollToBottom();
+    if (msg.audio_url) enqueueAudio(msg);
   } else if (msg.type === 'interim') {
     if (!msg.translation || !msg.translation.trim()) return;
     showInterim(msg.translation.trim());
@@ -586,108 +589,39 @@ function appendSettled(text) {
 }
 
 /* ─────────────────────────────────────────────────────
-   Queue — holds incoming chunks waiting to be typed
+   Audio queue — plays TTS independently of the text.
+   Text commits instantly; audio catches up or skips.
    ───────────────────────────────────────────────────── */
-function enqueue(item) {
-  queue.push(item);
+function enqueueAudio(item) {
+  audioQueue.push(item);
   updateQueueInfo();
-  if (!isProcessing) processNext();
+  if (!audioPlaying) playNextAudio();
 }
 
-function processNext() {
-  updateQueueInfo();
-  if (queue.length === 0) { isProcessing = false; return; }
-  isProcessing = true;
-
-  /* If the queue has backed up beyond the limit, flush stale items as
-     settled text without audio so the display snaps to near-real-time. */
-  while (queue.length > MAX_QUEUE_DEPTH) {
-    const stale = queue.shift();
-    const t = stale.translation && stale.translation.trim();
-    if (t) appendSettled(t);
-  }
+function playNextAudio() {
+  /* If audio has backed up beyond the limit, skip the oldest clips —
+     their text is already on screen, nothing is lost. */
+  while (audioQueue.length > MAX_AUDIO_QUEUE) audioQueue.shift();
   updateQueueInfo();
 
-  /* Capture depth before shifting — used to pick playback speed. */
-  const rate = getPlaybackRate(queue.length);
+  if (audioQueue.length === 0) { audioPlaying = false; return; }
+  audioPlaying = true;
 
-  const item  = queue.shift();
-  const text  = item.translation.trim();
-  if (!text) { processNext(); return; }
+  const item = audioQueue.shift();
+  const rate = getPlaybackRate(audioQueue.length);
+  updateQueueInfo();
 
-  hideEmptyHint();
+  const fullUrl = item.audio_url.startsWith('http')
+    ? item.audio_url
+    : HTTP_BASE + item.audio_url;
 
-  /* Create the active span that will receive typed characters */
-  const span = document.createElement('span');
-  span.className = 'chunk active';
-  textBody.appendChild(span);
-  scrollToBottom();
+  const audio = new Audio(fullUrl);
+  audio.playbackRate = rate;
+  currentAudio = audio;
 
-  let audioDone = false;
-  let typeDone  = false;
-
-  const trySettle = () => {
-    if (!audioDone || !typeDone) return;
-    span.className = 'chunk settled';
-    textBody.appendChild(document.createTextNode(' '));
-    totalWords += countWords(text);
-    trimToWordLimit();
-    setTimeout(processNext, 300); /* brief pause between chunks */
-  };
-
-  /* ── Start typewriter at a given ms-per-char rate ── */
-  const startTyping = msPerChar => {
-    let i = 0;
-    const tick = () => {
-      if (i >= text.length) { typeDone = true; trySettle(); return; }
-      span.textContent = text.slice(0, ++i);
-      scrollToBottom();
-      setTimeout(tick, msPerChar);
-    };
-    tick();
-  };
-
-  /* ── Audio ── */
-  if (item.audio_url) {
-    const fullUrl = item.audio_url.startsWith('http')
-      ? item.audio_url
-      : HTTP_BASE + item.audio_url;
-
-    const audio = new Audio(fullUrl);
-    audio.playbackRate = rate;
-    currentAudio = audio;
-
-    audio.onended  = () => { audioDone = true; trySettle(); };
-    audio.onerror  = () => { audioDone = true; trySettle(); };
-
-    /* Wait for metadata so we can sync typing speed to audio duration.
-       Divide duration by rate so the typewriter matches the sped-up audio.
-       Fall back to 70/rate ms/char if metadata takes too long.           */
-    let started = false;
-    const go = msPerChar => {
-      if (started) return;
-      started = true;
-      audio.play().catch(() => { audioDone = true; trySettle(); });
-      startTyping(msPerChar);
-    };
-
-    const fallback = setTimeout(() => go(Math.round(70 / rate)), 400);
-
-    audio.addEventListener('loadedmetadata', () => {
-      clearTimeout(fallback);
-      const effectiveDuration = audio.duration / rate;
-      const ms = audio.duration > 0
-        ? Math.max(25, Math.min(160, (effectiveDuration * 1000) / text.length))
-        : Math.round(70 / rate);
-      go(ms);
-    }, { once: true });
-
-    audio.load();
-  } else {
-    /* No audio — type at speed proportional to playback rate */
-    audioDone = true;
-    startTyping(Math.round(70 / rate));
-  }
+  audio.onended = playNextAudio;
+  audio.onerror = playNextAudio;
+  audio.play().catch(playNextAudio);
 }
 
 /* ─────────────────────────────────────────────────────
@@ -727,7 +661,7 @@ function setConnStatus(state) {
 }
 
 function updateQueueInfo() {
-  queueInfo.textContent = queue.length > 0 ? `${queue.length} queued` : '';
+  queueInfo.textContent = audioQueue.length > 0 ? `${audioQueue.length} audio queued` : '';
 }
 
 /* ─────────────────────────────────────────────────────
@@ -768,8 +702,8 @@ function switchLang(newLang) {
 
   /* Stop audio, clear queue and text body */
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-  queue.length = 0;
-  isProcessing = false;
+  audioQueue.length = 0;
+  audioPlaying = false;
   totalWords = 0;
   updateQueueInfo();
   textBody.innerHTML = '';

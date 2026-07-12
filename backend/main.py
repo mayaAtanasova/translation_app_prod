@@ -502,6 +502,7 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 continue
             if gen != utterance_gen:
                 continue    # a final/provisional landed while translating — stale
+            logger.info(f"Interim broadcast [{device_id}]: {text[:60]}")
             for lang_code, result in zip(TARGET_LANGUAGES, translations):
                 await broadcast_translation(lang_code, {
                     "type": "interim",
@@ -529,8 +530,12 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
         # Tracks chars of the current Google utterance already provisionally
         # processed, so the eventual is_final only TTSes the remainder.
         provisional_offset = 0
-        # Wall-clock time of the last is_final (or startup) — provisional fires
-        # when an interim arrives and this is more than PROVISIONAL_TIMEOUT ago.
+        # True while interims are flowing for an utterance that has not yet
+        # finalized. Lets the provisional timer start at utterance start
+        # rather than ticking through silence between utterances.
+        utterance_active = False
+        # Provisional fires when an interim arrives and this is more than
+        # PROVISIONAL_TIMEOUT seconds ago.
         last_final_time = loop.time()
 
         while True:
@@ -548,6 +553,7 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 chunk_counter += 1
                 chunk_id = f"s{chunk_counter:03d}"
                 provisional_offset = 0
+                utterance_active = False
                 last_final_time = loop.time()
                 drop_pending_interims()
                 logger.info(f"Final transcript [{device_id}]: {transcript}")
@@ -561,6 +567,13 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                     logger.info(f"Final transcript [{device_id}] fully covered by provisional chunks")
             else:
                 remaining = transcript[provisional_offset:].strip()
+
+                # First interim of a new utterance — start the provisional
+                # timer here, not at the last final (the gap in between is
+                # silence and must not count against the timeout).
+                if not utterance_active:
+                    utterance_active = True
+                    last_final_time = loop.time()
 
                 # Provisional: fire when an interim arrives and we haven't had
                 # a final result for PROVISIONAL_TIMEOUT seconds

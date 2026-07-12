@@ -326,25 +326,6 @@ def _split_at_comma(text: str) -> str:
     return text.strip()
 
 
-async def broadcast_interim_translation(lang_code: str, lang_info: dict, transcript: str):
-    """Translate and broadcast an interim result — no TTS, no file I/O."""
-    try:
-        result = await asyncio.to_thread(
-            translate_client.translate,
-            transcript,
-            target_language=lang_info['translate_code'],
-            source_language='en',
-        )
-        await broadcast_translation(lang_code, {
-            "type": "interim",
-            "translation": result['translatedText'],
-            "original": transcript,
-            "language": lang_code,
-        })
-    except Exception as e:
-        logger.error(f"Interim translation error ({lang_code}): {e}")
-
-
 async def process_language_streaming(
     lang_code: str, lang_info: dict, transcript: str, chunk_id: str, session_id: str
 ):
@@ -490,12 +471,61 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
         finally:
             audio_q.put(None)   # signal STT thread to stop
 
+    # ── Interim translation: latest-wins coalescing worker ──────────
+    # Interim tails are translated in a background task so they never
+    # block the result loop (which stalls 1-2s on TTS for finals).
+    # Each new interim overwrites the pending one; the worker always
+    # translates the newest text. utterance_gen is bumped whenever a
+    # final/provisional commits, so in-flight interim translations that
+    # would land after (and behind) committed text are dropped.
+    interim_latest = None    # (text, generation) awaiting translation
+    interim_task = None
+    utterance_gen = 0
+
+    async def interim_worker():
+        nonlocal interim_latest
+        while interim_latest is not None:
+            text, gen = interim_latest
+            interim_latest = None
+            try:
+                translations = await asyncio.gather(*[
+                    asyncio.to_thread(
+                        translate_client.translate,
+                        text,
+                        target_language=lang_info['translate_code'],
+                        source_language='en',
+                    )
+                    for lang_info in TARGET_LANGUAGES.values()
+                ])
+            except Exception as e:
+                logger.error(f"Interim translation error: {e}")
+                continue
+            if gen != utterance_gen:
+                continue    # a final/provisional landed while translating — stale
+            for lang_code, result in zip(TARGET_LANGUAGES, translations):
+                await broadcast_translation(lang_code, {
+                    "type": "interim",
+                    "translation": result['translatedText'],
+                    "original": text,
+                    "language": lang_code,
+                })
+
+    def schedule_interim(text: str):
+        nonlocal interim_latest, interim_task
+        interim_latest = (text, utterance_gen)
+        if interim_task is None or interim_task.done():
+            interim_task = asyncio.create_task(interim_worker())
+
+    def drop_pending_interims():
+        nonlocal interim_latest, utterance_gen
+        utterance_gen += 1
+        interim_latest = None
+
     async def process_results():
+        nonlocal utterance_gen
         PROVISIONAL_TIMEOUT = 4   # seconds since last is_final before forcing interim
 
         chunk_counter = 0
-        last_interim_words = 0
-        last_interim_text = ""
         # Tracks chars of the current Google utterance already provisionally
         # processed, so the eventual is_final only TTSes the remainder.
         provisional_offset = 0
@@ -517,10 +547,9 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 remaining = transcript[provisional_offset:].strip()
                 chunk_counter += 1
                 chunk_id = f"s{chunk_counter:03d}"
-                last_interim_words = 0
-                last_interim_text = ""
                 provisional_offset = 0
                 last_final_time = loop.time()
+                drop_pending_interims()
                 logger.info(f"Final transcript [{device_id}]: {transcript}")
 
                 if remaining:
@@ -531,7 +560,6 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                 else:
                     logger.info(f"Final transcript [{device_id}] fully covered by provisional chunks")
             else:
-                last_interim_text = transcript
                 remaining = transcript[provisional_offset:].strip()
 
                 # Provisional: fire when an interim arrives and we haven't had
@@ -543,21 +571,16 @@ async def audio_stream_endpoint(websocket: WebSocket, device_id: str):
                     logger.info(f"Provisional transcript [{device_id}]: {provisional}")
                     provisional_offset += len(provisional)
                     last_final_time = loop.time()   # reset so next provisional waits another N secs
-                    last_interim_words = 0
+                    drop_pending_interims()
                     await asyncio.gather(*[
                         process_language_streaming(lang_code, lang_info, provisional, chunk_id, session_id)
                         for lang_code, lang_info in TARGET_LANGUAGES.items()
                     ])
-                else:
-                    # Normal interim throttle: re-translate every 3 new words
-                    word_count = len(remaining.split())
-                    if word_count >= last_interim_words + 3:
-                        last_interim_words = word_count
-                        logger.debug(f"Interim [{device_id}]: {remaining}")
-                        await asyncio.gather(*[
-                            broadcast_interim_translation(lang_code, lang_info, remaining)
-                            for lang_code, lang_info in TARGET_LANGUAGES.items()
-                        ])
+                elif remaining:
+                    # Hand the newest tail to the coalescing worker; it
+                    # translates as fast as latency allows, dropping
+                    # anything superseded in the meantime.
+                    schedule_interim(remaining)
 
     stt_future = loop.run_in_executor(None, stt_worker)
     await asyncio.gather(receive_audio(), process_results())

@@ -208,6 +208,13 @@
     color: var(--text);
     transition: color 0.6s ease;
   }
+  /* Blinking cursor while a committed chunk is typing out */
+  .chunk.committed.typing::after {
+    content: '\25AE'; /* ▮ */
+    color: var(--copper);
+    animation: blink-cursor 0.85s step-end infinite;
+    margin-left: 2px;
+  }
 
   /* Interim (streaming STT in progress) chunk — dimmed, italic */
   .chunk.interim {
@@ -421,9 +428,8 @@ const MAX_AUDIO_QUEUE = 4; /* skip oldest audio beyond this depth (text is alrea
 
 function getPlaybackRate(queueDepth) {
   if (queueDepth <= 0) return 1.0;
-  if (queueDepth === 1) return 1.15;
-  if (queueDepth === 2) return 1.3;
-  return 1.5;
+  if (queueDepth === 1) return 1.1;
+  return 1.2;
 }
 
 /* ─────────────────────────────────────────────────────
@@ -528,7 +534,7 @@ function handleMessage(msg) {
        The chunk stays black until its TTS clip has played (or been
        skipped), then settles to grey. */
     clearInterim();
-    const span = appendCommitted(msg.translation.trim());
+    const span = appendCommitted(msg.translation.trim(), true);
     scrollToBottom();
     if (msg.audio_url) {
       msg._span = span;
@@ -599,20 +605,61 @@ function appendSettled(text) {
    Append a final chunk in black; settles to grey once
    its audio has played or been skipped
    ───────────────────────────────────────────────────── */
-function appendCommitted(text) {
+function appendCommitted(text, animate) {
   hideEmptyHint();
   const span = document.createElement('span');
   span.className = 'chunk committed';
-  span.textContent = text;
+  span.textContent = animate ? '' : text;
   textBody.appendChild(span);
   textBody.appendChild(document.createTextNode(' '));
   totalWords += countWords(text);
   trimToWordLimit();
+  if (animate) typeCommitted(span, text);
   return span;
 }
 
 function settleChunk(span) {
   span.className = 'chunk settled';
+}
+
+/* ─────────────────────────────────────────────────────
+   Cosmetic typewriter — fast fixed rate, independent of
+   audio. If commits back up, older ones finish instantly
+   so the animation never delays the transcript.
+   ───────────────────────────────────────────────────── */
+const TYPE_MS_PER_CHAR = 14;
+const typeQueue = [];
+let typing = false;
+
+function typeCommitted(span, text) {
+  typeQueue.push({ span, text });
+  if (!typing) typeNext();
+}
+
+function typeNext() {
+  /* Flush all but the newest pending chunk instantly */
+  while (typeQueue.length > 1) {
+    const t = typeQueue.shift();
+    t.span.textContent = t.text;
+  }
+  if (typeQueue.length === 0) { typing = false; return; }
+  typing = true;
+
+  const { span, text } = typeQueue.shift();
+  span.classList.add('typing');
+  let i = 0;
+  const tick = () => {
+    if (i >= text.length) {
+      span.classList.remove('typing');
+      scrollToBottom();
+      typeNext();
+      return;
+    }
+    span.textContent = text.slice(0, ++i);
+    scrollToBottom();
+    setTimeout(tick, TYPE_MS_PER_CHAR);
+  };
+  tick();
 }
 
 /* ─────────────────────────────────────────────────────
@@ -738,6 +785,8 @@ function switchLang(newLang) {
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
   audioQueue.length = 0;
   audioPlaying = false;
+  typeQueue.length = 0;
+  typing = false;
   totalWords = 0;
   updateQueueInfo();
   textBody.innerHTML = '';
